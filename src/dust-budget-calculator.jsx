@@ -182,7 +182,7 @@ export default function DustBudgetCalculator() {
   const [cWrites, setCWrites] = useState(5);
   const [cTxPer, setCTxPer] = useState(5);
   const [cActDay, setCActDay] = useState(200);
-  const [ck, setCk] = useState("floor");
+  const [ck, setCk] = useState("target");
   const [buf, setBuf] = useState(25);
   const [showCal, setShowCal] = useState(false);
 
@@ -337,9 +337,15 @@ export default function DustBudgetCalculator() {
       {/* 2: Congestion */}
       <section style={{ marginBottom: 28, paddingBottom: 24, borderBottom: "1px solid var(--section-border)" }}>
         <h2 style={{ fontSize: 13, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--muted)", marginBottom: 14 }}>2 — Network Conditions</h2>
+        <p style={{ fontSize: 11, color: "var(--muted)", margin: "0 0 10px", lineHeight: 1.5 }}>
+          Fees adjust dynamically based on <strong style={{ color: "var(--label)" }}>previous block fullness</strong>. Each block, prices shift ±4.6% toward the 50% utilization target. Floor = current preprod (near-empty blocks, best case). Plan for Target — that's where a healthy mainnet stabilizes.
+        </p>
         <div style={{ marginBottom: 14 }}>
           <Pills options={Object.entries(CONGESTION).map(([k, v]) => ({ value: k, label: v.label }))} value={ck} onChange={setCk} />
-          <p style={{ fontSize: 11, color: "var(--muted)", margin: "6px 0 0" }}>{cong.desc}</p>
+          <p style={{ fontSize: 11, color: "var(--muted)", margin: "6px 0 0" }}>
+            {cong.desc}
+            {ck === "floor" && <span style={{ color: "var(--warn-text)" }}> — This is the cheapest fees will ever be. Not recommended for mainnet planning.</span>}
+          </p>
         </div>
         <div style={{ maxWidth: 200 }}>
           <NumInput label="Safety buffer" value={buf} onChange={setBuf} unit="%" min={0} max={200} step={5} help="Headroom above minimum" />
@@ -402,6 +408,8 @@ export default function DustBudgetCalculator() {
         <h2 style={{ fontSize: 13, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--muted)", marginBottom: 14 }}>Planning Notes</h2>
         <div style={{ padding: "14px 16px", borderRadius: 8, background: "var(--card-bg)", border: "1px solid var(--border)", fontSize: 12, lineHeight: 1.7, color: "var(--label)" }}>
           <div style={{ marginBottom: 8 }}><strong style={{ color: "var(--text)" }}>Two-tier fee structure.</strong> No-proof TXs: 0.30 DUST. With-proof TXs: ~66-70 DUST. The proof is the cost — circuit complexity (k-value) barely matters. Budget around TX count, not circuit size.</div>
+          <div style={{ marginBottom: 8 }}><strong style={{ color: "var(--text)" }}>Prices adjust every block based on previous block fullness.</strong> Below 50% → prices decrease. Above 50% → prices increase. ±4.6% per block (every 6s). At 75% sustained utilization, fees roughly 12× floor within 10 minutes. At 90%, fees double every ~96 seconds. Prices cool equally fast when demand drops.</div>
+          <div style={{ marginBottom: 8 }}><strong style={{ color: "var(--text)" }}>Floor fees are the best case.</strong> All confirmed data is from near-empty preprod blocks where prices have been declining to the MIN_COST floor. On a healthy mainnet at ~50% utilization, prices stabilize but won't decrease. Plan for Target, not Floor.</div>
           <div style={{ marginBottom: 8 }}><strong style={{ color: "var(--text)" }}>Writes add marginally.</strong> Each ledger write adds ~0.4 DUST. Going from 3 to 13 writes only adds ~4 DUST (~6% of total). Optimize TX count, not writes per TX.</div>
           <div style={{ marginBottom: 8 }}><strong style={{ color: "var(--text)" }}>Cap runway is hours, not days.</strong> At ~69 DUST/TX for contract calls, your DUST cap depletes fast. Continuous regen from NIGHT is essential — any interruption (redesignation, transfer) risks outage.</div>
           <div style={{ marginBottom: 8 }}><strong style={{ color: "var(--text)" }}>Proving time is the throughput cap.</strong> ~22s/proof regardless of k (7-12). ~160 proofs/hr per server. Scale horizontally.</div>
