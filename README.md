@@ -2,61 +2,74 @@
 
 **DUST Budget Calculator for Midnight DApp Operators**
 
-Estimate the NIGHT token holdings required to sustain DApp operations on the Midnight network.
+Estimate the NIGHT token holdings required to sustain DApp operations on the Midnight network. Input your circuit characteristics (k-value, ledger writes, TX volume) and get NIGHT requirements, sustainability projections, and congestion scenarios.
 
-## ⚠️ v0.4 — Corrected Fee Data
+## Fee Model
 
-The original testnet report (v0.1–v0.3) used the client-side `additionalFeeOverhead` (300T / 0.3 DUST) as the per-TX fee. **This was only a wallet SDK buffer, not the actual network fee.** Explorer-confirmed fee for `post_big_blind` (6 ledger writes) is **~69 DUST per TX** — approximately 230× higher. All calculations have been corrected.
+Every Midnight transaction pays for at least one ZK proof (the DUST spend proof). Application-level circuit proofs and ledger writes add cost above the floor.
 
-## What's Here
+```
+fee ≈ DUST_proof_base (0.30 DUST, constant)
+    + app_proof_cost (~6.0 DUST per k-level)
+    + write_cost    (~1.45 DUST per ledger write)
+```
 
-### `src/dust-budget-calculator.jsx`
-Interactive React calculator that lets DApp operators:
+Calibrated from two confirmed data points on Midnight preprod:
 
-- Select from preset DApp profiles or define custom patterns
-- Model congestion scenarios from floor to 90% utilization spikes
-- See DUST burn rates and required NIGHT holdings
-- Check sustainability: regen vs burn ratio (testnet shows ~1.015× — thin margin)
+| Transaction | Fee | k | Writes | Source |
+|---|---|---|---|---|
+| NIGHT transfer | **0.30 DUST** | — | 0 | Protocol architect (confirmed) |
+| `post_big_blind` | **~69 DUST** | 10 | 6 | Preprod explorer (confirmed) |
 
-### `docs/midnight-tx-profile-data-request.docx`
-Data request for protocol team — SyntheticCost vectors for common TX types.
+Under congestion, dynamic pricing (±4.6% per block, every 6s) scales fees above these floor values.
 
-## Key Numbers
+## Key Insight: Proving Time is Flat
 
-| Parameter | Value | Source |
-|-----------|-------|--------|
-| **Per-TX fee (floor)** | **~69 DUST** | Explorer (preprod, `post_big_blind`, 6 writes) |
-| DUST per NIGHT | 5 DUST / ~7 days | `INITIAL_DUST_PARAMETERS` |
-| Block time | 6 seconds | Confirmed |
-| Target fullness | 50% | Cost model whitepaper |
-| Price adjustment | ±4.595% per block | `price_adjustment_a_parameter` |
-| Regen/burn ratio (testnet) | ~1.015× | Corrected report (was 3.6×) |
+Circuit k-value ranges from 7 to 12 across the Dominion Poker contract (32× domain size difference), but proving time is constant at ~22-23s. The proof server setup/serialization overhead dominates, not circuit complexity. This means the `proof_verify_constant` (~5.8s) in the cost model drives compute cost equally for all proof-bearing transactions.
 
-## Testnet Reference (Corrected)
-
-From Dominion Poker on Midnight preprod (231 games, 3,624 TXs):
-
-- **Avg game cost: ~1,083 DUST** (15.7 TXs × ~69 DUST) — was 4.7 DUST in original report
-- ~4,000 tNIGHT sustained the system, but with only ~1.5% surplus margin
-- DUST pool grew +1,812 over 110 games via ~121K regen vs ~119K burn (thin net)
-- Runway without regen: ~2 hours (was reported as 20 days)
-- Fee varies by circuit — 69 DUST is mid-range (6 writes); simpler circuits likely cheaper
-- Proof server (~22s/proof) remains the throughput bottleneck
-
-## Development
+## Usage
 
 ```bash
 npm install
 npm run dev      # local dev server
-npm run build    # production build (Vercel auto-deploys)
+npm run build    # production build
+```
+
+The calculator lets operators:
+- Select preset profiles (NIGHT transfer, light/medium/heavy contracts, poker) or define custom TX characteristics
+- Input circuit k-value, ledger writes per TX, and daily volume
+- Model congestion from floor to 90% utilization spikes
+- See fee breakdown, burn rates, NIGHT requirements, and regen/burn sustainability
+
+## For Precise Estimates
+
+The Midnight ledger API (`@midnight/ledger`) provides exact fee computation:
+
+```typescript
+// Mock prove for fee estimation (no proof server needed)
+const mockTx = transaction.mockProve();
+const fee = mockTx.fees(ledgerParams);
+
+// With margin for fee blocks
+const feeMargin = mockTx.feesWithMargin(ledgerParams, margin);
+
+// Pre-proving estimation
+const est = balancedFees + inputs * costModel.inputFeeOverhead + outputs * costModel.outputFeeOverhead;
 ```
 
 ## Status
 
-**v0.4** — Explorer-corrected fees. Still need:
-1. Per-circuit fee data (all 21 circuits, not just `post_big_blind`)
-2. SyntheticCost vectors from protocol team
-3. Proof verification cost clarification
+**v0.5** — Generic input-based model. Two calibration points. Estimates will improve with:
+1. Explorer fees for additional circuit types (3-write, 13-write)
+2. Direct ledger API integration for exact fee computation
+3. Per-circuit fee data from `Transaction.fees()` / `mockProve()`
+
+## Sources
+
+- [Cost model whitepaper](docs/) — Midnight's multi-dimensional fee architecture
+- [Dominion Poker testnet report](https://gist.github.com/UvRoxx/c6272e68f0ce4e91698c1a56fbe6badd) — Corrected fee data
+- [Circuit analysis](https://gist.github.com/UvRoxx/87dbfe7bfc2cf3ea853a86e471878090) — k-values and proving times
+- [Ledger parameters](docs/) — Initial protocol configuration
 
 ## License
 
