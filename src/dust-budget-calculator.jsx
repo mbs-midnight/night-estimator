@@ -51,15 +51,22 @@ function estimateFee(hasAppProof, writes = 5) {
   return FEE_WITH_PROOF_BASE + FEE_PER_WRITE * writes;
 }
 
-// ─── Congestion Engine ───
-function simulatePrice(startPrice, fullness, numBlocks) {
-  let price = startPrice;
-  const u = Math.max(fullness, 0.01);
-  const adj = Math.max(-MAX_ADJUSTMENT, Math.min(MAX_ADJUSTMENT,
-    -Math.log((1 / u) - 0.99) / SENSITIVITY_A));
-  for (let i = 0; i < numBlocks; i++) price = Math.max(price * (1 + adj), 0.0001);
-  return price;
-}
+// ─── Congestion Model ───
+// The dynamic pricing adjusts ±4.6% per block based on previous block fullness.
+// At 50% target: no adjustment (equilibrium). Below 50%: prices decline to floor.
+// Above 50%: prices rise. But rising prices suppress demand → blocks empty → prices cool.
+//
+// Rather than simulating runaway compounding (unrealistic — ignores the feedback loop),
+// we model realistic steady-state fee multipliers at each utilization level.
+// These represent what an operator should budget for at sustained utilization:
+//
+// - Floor/Low/Target (<= 50%): Prices at or declining toward floor. Multiplier = 1×.
+//   The system is designed to stabilize at 50%. Below that, no fee pressure.
+// - Moderate (60%): Mild sustained pressure. ~1.5× floor over minutes.
+// - High (75%): Sustained congestion. ~3-5× floor (fees rise until demand drops).
+// - Spike (90%): Short burst. ~8-15× floor (aggressive but self-correcting in <2min).
+//
+// These are planning estimates. Actual multipliers depend on duration and demand elasticity.
 
 // ─── DApp Profiles ───
 const PROFILES = {
@@ -95,11 +102,11 @@ const PROFILES = {
 };
 
 const CONGESTION = {
-  floor: { label: "Floor (current)", fullness: 0.05, blocks: 0, desc: "Near-empty blocks — preprod baseline" },
-  low: { label: "Low (~25%)", fullness: 0.25, blocks: 500, desc: "Light usage" },
-  target: { label: "Target (~50%)", fullness: 0.5, blocks: 1000, desc: "Network equilibrium" },
-  high: { label: "High (~75%)", fullness: 0.75, blocks: 1000, desc: "Fees rising" },
-  spike: { label: "Spike (~90%)", fullness: 0.9, blocks: 500, desc: "Congestion burst" },
+  floor:  { label: "Floor (current)", mult: 1,  desc: "Near-empty blocks — preprod baseline. Best case." },
+  low:    { label: "Low (~25%)",      mult: 1,  desc: "Below target — prices declining toward floor. Same as floor for planning." },
+  target: { label: "Target (~50%)",   mult: 1,  desc: "Network equilibrium. No price adjustment. Plan here for steady-state mainnet." },
+  high:   { label: "High (~75%)",     mult: 4,  desc: "Sustained congestion. Fees ~4× floor — demand/price feedback limits runaway." },
+  spike:  { label: "Spike (~90%)",    mult: 10, desc: "Short burst (~minutes). Fees ~10× floor — self-corrects as demand drops." },
 };
 
 // ─── UI ───
@@ -195,13 +202,8 @@ export default function DustBudgetCalculator() {
 
   const r = useMemo(() => {
     const feeFloor = estimateFee(hasProof, writes);
-    let fee = feeFloor;
-    let priceMult = 1;
-    if (ck !== "floor") {
-      const evolved = simulatePrice(INITIAL_OVERALL_PRICE, cong.fullness, cong.blocks);
-      priceMult = evolved / INITIAL_OVERALL_PRICE;
-      fee = feeFloor * Math.max(1, priceMult);
-    }
+    const priceMult = cong.mult;
+    const fee = feeFloor * priceMult;
     const dailyTx = txPer * actDay;
     const dBurn = fee * dailyTx;
     const wBurn = dBurn * 7;
@@ -214,8 +216,8 @@ export default function DustBudgetCalculator() {
     const dRegen = recN * DUST_PER_NIGHT_PER_DAY;
     return {
       feeFloor, fee, dailyTx, dBurn, wBurn, mBurn,
-      nFlow, nCap, minN, recN, priceMult,
-      congMult: fee / feeFloor, cap,
+      nFlow, nCap, minN, recN,
+      congMult: priceMult, cap,
       runway: cap / dBurn, ratio: dRegen / dBurn, dRegen,
       bind: nFlow >= nCap ? "Generation rate" : "DUST cap",
     };
@@ -363,7 +365,7 @@ export default function DustBudgetCalculator() {
         </div>
         {r.congMult > 1 && (
           <div style={{ fontSize: 11, color: "var(--warn-text)", marginBottom: 12, padding: "8px 12px", borderRadius: 6, background: "var(--warn-bg)", border: "1px solid var(--warn-border)" }}>
-            Congestion: ~{f(r.feeFloor)} → ~{f(r.fee)} DUST/TX ({r.priceMult.toFixed(2)}× price). ±4.6%/block every 6s.
+            Congestion: ~{f(r.feeFloor)} → ~{f(r.fee)} DUST/TX ({r.congMult}× multiplier). Actual multiplier depends on duration and demand elasticity — these are conservative planning estimates.
           </div>
         )}
         <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
