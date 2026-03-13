@@ -10,33 +10,45 @@ const INITIAL_OVERALL_PRICE = 10;
 const MAX_ADJUSTMENT = 0.04595;
 const SENSITIVITY_A = 100;
 
-// ─── FEE CALIBRATION ───
-// Two confirmed data points from Midnight preprod:
-//   1. Simple NIGHT transfer (DUST proof only, minimal writes): ~0.30 DUST
-//   2. post_big_blind (k=10, 6 writes, application proof): ~69 DUST
-// Every TX pays for at least one ZK proof (the DUST spend proof).
-// Application-level proofs, ledger writes, and TX size drive costs above the floor.
-const FEE_FLOOR = 0.30;              // NIGHT transfer — absolute minimum
-const FEE_MID = 69;                  // post_big_blind (k=10, 6 writes)
-const MID_K = 10;
-const MID_WRITES = 6;
+// ─── FEE MODEL (calibrated from 5 preprod data points) ───
+//
+// Observed fees (Midnight preprod explorer, Dominion Poker):
+//   commit_action_state  k=7   3 writes   66.31 DUST
+//   post_small_blind     k=11  5 writes   68.63 DUST
+//   post_big_blind       k=10  6 writes   ~69   DUST
+//   commit_deck_cards    k=10  13 writes  70.42 DUST
+//   NIGHT transfer       —     0 writes   0.30  DUST
+//
+// Key finding: fees are nearly flat (~66-70 DUST, ±3%) across all contract
+// circuits regardless of k-value (7-12) or write count (3-13).
+// Fee is dominated by a large constant (proof verification + TX base cost).
+// k and writes contribute only marginally.
+//
+// Two-tier model:
+//   - No app proof (NIGHT transfer): 0.30 DUST
+//   - With app proof (any contract call): ~68 DUST ± 5%
+//
+// Marginal effects (small but observable):
+//   - Per write: ~0.4 DUST (from 66.31@3writes to 70.42@13writes ≈ 0.41/write)
+//   - Per k-level: negligible (dominated by constant)
 
-// Derived: estimate fee as base + proof_component + write_component
-// With 2 data points we model linearly. More data points will refine this.
-// Base (DUST proof only, ~0 app writes): 0.30 DUST
-// post_big_blind adds: app proof (k=10) + 6 writes = 68.7 DUST above base
-// We split attribution: assume proof dominates (most of the cost) with writes adding marginally
-// This will be refined when we get fees for 3-write and 13-write circuits
-const EST_PROOF_COST_PER_K = 6.0;     // ~60 DUST for k=10 proof → 6/k level (rough)
-const EST_WRITE_COST = 1.45;          // Residual: (69 - 0.3 - 60) / 6 writes ≈ 1.45/write
+const FEE_NO_PROOF = 0.30;          // NIGHT transfer — confirmed
+const FEE_WITH_PROOF_BASE = 67.0;   // Base cost for any TX with app proof
+const FEE_PER_WRITE = 0.41;         // Marginal cost per ledger write (derived from data)
+const FEE_WITH_PROOF_AVG = 68.5;    // Simple average for quick estimates
 
-function estimateFee(hasAppProof, k = 10, writes = 3) {
-  let fee = FEE_FLOOR; // Every TX pays DUST proof base
-  if (hasAppProof) {
-    fee += EST_PROOF_COST_PER_K * k;  // Application circuit proof
-  }
-  fee += EST_WRITE_COST * writes;     // Ledger writes
-  return fee;
+// Observed data for calibration display
+const CALIBRATION = [
+  { circuit: "NIGHT transfer", k: "—", writes: 0, fee: 0.30, confirmed: true },
+  { circuit: "commit_action_state", k: 7, writes: 3, fee: 66.31, confirmed: true },
+  { circuit: "post_small_blind", k: 11, writes: 5, fee: 68.63, confirmed: true },
+  { circuit: "post_big_blind", k: 10, writes: 6, fee: 69.00, confirmed: true },
+  { circuit: "commit_deck_cards", k: 10, writes: 13, fee: 70.42, confirmed: true },
+];
+
+function estimateFee(hasAppProof, writes = 5) {
+  if (!hasAppProof) return FEE_NO_PROOF;
+  return FEE_WITH_PROOF_BASE + FEE_PER_WRITE * writes;
 }
 
 // ─── Congestion Engine ───
@@ -52,34 +64,33 @@ function simulatePrice(startPrice, fullness, numBlocks) {
 // ─── DApp Profiles ───
 const PROFILES = {
   custom: {
-    label: "Custom",
-    desc: "Define your own transaction characteristics",
-    hasProof: true, k: 10, writes: 5, txPerAction: 5, actionsPerDay: 200,
+    label: "Custom", desc: "Define your own transaction pattern",
+    hasProof: true, writes: 5, txPerAction: 5, actionsPerDay: 200,
   },
   nightTransfer: {
     label: "NIGHT Transfer",
-    desc: "Simple token transfer. DUST proof only, no application circuit. Confirmed floor: 0.30 DUST.",
-    hasProof: false, k: 0, writes: 0, txPerAction: 1, actionsPerDay: 1000, badge: "CONFIRMED",
+    desc: "Simple token transfer. No application circuit — 0.30 DUST confirmed.",
+    hasProof: false, writes: 0, txPerAction: 1, actionsPerDay: 1000, badge: "✓",
   },
   pokerTable: {
     label: "Poker (2P)",
-    desc: "Dominion Poker preprod: ~15.7 TXs/game, ~4.8 games/hr. post_big_blind fee confirmed at ~69 DUST (k=10, 6 writes).",
-    hasProof: true, k: 10, writes: 6, txPerAction: 15.7, actionsPerDay: 115, badge: "TESTNET",
+    desc: "Dominion Poker: ~15.7 TXs/game, ~4.8 games/hr. Fee ~66-70 DUST/TX across all circuits (k=7-12, 3-13 writes).",
+    hasProof: true, writes: 6, txPerAction: 15.7, actionsPerDay: 115, badge: "✓",
   },
   lightContract: {
     label: "Light Contract",
-    desc: "Simple DApp call — small circuit (k≈7-8), few state updates (2-3 writes).",
-    hasProof: true, k: 8, writes: 3, txPerAction: 2, actionsPerDay: 500,
+    desc: "Simple DApp — small circuit, few writes. Fee still ~67-68 DUST (proof dominates).",
+    hasProof: true, writes: 2, txPerAction: 2, actionsPerDay: 500,
   },
   mediumContract: {
     label: "Medium Contract",
-    desc: "DEX trade, lending action — mid-size circuit (k≈10), moderate writes (5-8).",
-    hasProof: true, k: 10, writes: 6, txPerAction: 4, actionsPerDay: 200,
+    desc: "DEX/lending — moderate writes. Fee ~68-70 DUST.",
+    hasProof: true, writes: 6, txPerAction: 4, actionsPerDay: 200,
   },
   heavyContract: {
     label: "Heavy Contract",
-    desc: "Complex multi-party interaction — large circuit (k≈12+), heavy state updates (10-15 writes).",
-    hasProof: true, k: 12, writes: 12, txPerAction: 8, actionsPerDay: 50,
+    desc: "Complex operations — many writes. Fee ~72-75 DUST (writes add marginally).",
+    hasProof: true, writes: 15, txPerAction: 8, actionsPerDay: 50,
   },
 };
 
@@ -87,7 +98,7 @@ const CONGESTION = {
   floor: { label: "Floor (current)", fullness: 0.05, blocks: 0, desc: "Near-empty blocks — preprod baseline" },
   low: { label: "Low (~25%)", fullness: 0.25, blocks: 500, desc: "Light usage" },
   target: { label: "Target (~50%)", fullness: 0.5, blocks: 1000, desc: "Network equilibrium" },
-  high: { label: "High (~75%)", fullness: 0.75, blocks: 1000, desc: "Sustained pressure — fees rising" },
+  high: { label: "High (~75%)", fullness: 0.75, blocks: 1000, desc: "Fees rising" },
   spike: { label: "Spike (~90%)", fullness: 0.9, blocks: 500, desc: "Congestion burst" },
 };
 
@@ -155,8 +166,7 @@ function Pills({ options, value, onChange }) {
         }}>
           {o.badge && <span style={{
             position: "absolute", top: -6, right: -4, fontSize: 8, fontWeight: 700,
-            background: o.badge === "CONFIRMED" || o.badge === "TESTNET" ? "var(--accent-border)" : "var(--warn-border)",
-            color: "#fff", padding: "1px 5px", borderRadius: 6,
+            background: "var(--accent-border)", color: "#fff", padding: "1px 5px", borderRadius: 6,
           }}>{o.badge}</span>}
           {o.label}
         </button>
@@ -167,25 +177,24 @@ function Pills({ options, value, onChange }) {
 
 // ─── Main ───
 export default function DustBudgetCalculator() {
-  const [pk, setPk] = useState("pokerTable");
+  const [pk, setPk] = useState("mediumContract");
   const [cProof, setCProof] = useState(true);
-  const [cK, setCK] = useState(10);
   const [cWrites, setCWrites] = useState(5);
   const [cTxPer, setCTxPer] = useState(5);
   const [cActDay, setCActDay] = useState(200);
   const [ck, setCk] = useState("floor");
   const [buf, setBuf] = useState(25);
+  const [showCal, setShowCal] = useState(false);
 
   const p = PROFILES[pk];
   const cong = CONGESTION[ck];
   const hasProof = pk === "custom" ? cProof : p.hasProof;
-  const kVal = pk === "custom" ? cK : p.k;
   const writes = pk === "custom" ? cWrites : p.writes;
   const txPer = pk === "custom" ? cTxPer : p.txPerAction;
   const actDay = pk === "custom" ? cActDay : p.actionsPerDay;
 
   const r = useMemo(() => {
-    const feeFloor = estimateFee(hasProof, kVal, writes);
+    const feeFloor = estimateFee(hasProof, writes);
     let fee = feeFloor;
     let priceMult = 1;
     if (ck !== "floor") {
@@ -209,12 +218,8 @@ export default function DustBudgetCalculator() {
       congMult: fee / feeFloor, cap,
       runway: cap / dBurn, ratio: dRegen / dBurn, dRegen,
       bind: nFlow >= nCap ? "Generation rate" : "DUST cap",
-      // Fee breakdown
-      dustProofCost: FEE_FLOOR,
-      appProofCost: hasProof ? EST_PROOF_COST_PER_K * kVal : 0,
-      writeCost: EST_WRITE_COST * writes,
     };
-  }, [hasProof, kVal, writes, txPer, actDay, ck, cong, buf]);
+  }, [hasProof, writes, txPer, actDay, ck, cong, buf]);
 
   const f = (n, d = 2) => {
     if (n === 0) return "0";
@@ -246,71 +251,86 @@ export default function DustBudgetCalculator() {
         <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6 }}>
           <div style={{ width: 32, height: 32, borderRadius: "50%", border: "2px solid var(--accent-border)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 14 }}>◑</div>
           <h1 style={{ fontSize: 22, fontWeight: 700, margin: 0, letterSpacing: "-0.02em" }}>NIGHT Estimator</h1>
-          <span style={{ fontSize: 10, fontWeight: 600, background: "var(--accent-border)", color: "#fff", padding: "2px 8px", borderRadius: 10 }}>v0.5</span>
+          <span style={{ fontSize: 10, fontWeight: 600, background: "var(--accent-border)", color: "#fff", padding: "2px 8px", borderRadius: 10 }}>v0.6</span>
         </div>
         <p style={{ fontSize: 13, color: "var(--muted)", margin: 0, lineHeight: 1.5 }}>
           Estimate NIGHT holdings to sustain DApp operations on Midnight.
         </p>
       </div>
 
-      {/* Calibration info */}
+      {/* Key insight banner */}
       <div style={{ padding: "12px 16px", borderRadius: 8, marginBottom: 24, background: "var(--testnet-bg)", border: "1px solid var(--testnet-border)" }}>
         <div style={{ fontSize: 12, fontWeight: 600, color: "var(--testnet-text)", marginBottom: 4 }}>
-          Fee model — 2 calibration points
+          Fee structure — confirmed from 5 preprod data points
         </div>
         <div style={{ fontSize: 11, color: "var(--muted)", lineHeight: 1.6 }}>
-          <strong style={{ color: "var(--testnet-text)" }}>0.30 DUST</strong> — NIGHT transfer (DUST proof only, no app circuit) · <strong style={{ color: "var(--testnet-text)" }}>~69 DUST</strong> — contract call with proof (k=10, 6 writes, <code style={{ fontSize: 10, background: "var(--card-bg)", padding: "1px 4px", borderRadius: 3 }}>post_big_blind</code>).
-          Every TX pays for a DUST spend proof. Application circuits, ledger writes, and TX size add cost above the floor. Fee model is estimated — will be refined with additional explorer data and ledger API integration.
+          <strong style={{ color: "var(--testnet-text)" }}>Two tiers:</strong> NIGHT transfers cost <strong style={{ color: "var(--testnet-text)" }}>0.30 DUST</strong>. Contract calls with ZK proofs cost <strong style={{ color: "var(--testnet-text)" }}>~66-70 DUST</strong> regardless of circuit complexity (k=7 to k=12, 3 to 13 writes — only ±3% variation). The proof verification dominates; writes add ~0.4 DUST each.
+          <span style={{ display: "inline-block", marginLeft: 4, cursor: "pointer", color: "var(--testnet-text)", textDecoration: "underline", fontSize: 10 }} onClick={() => setShowCal(!showCal)}>
+            {showCal ? "hide data ▲" : "show data ▼"}
+          </span>
         </div>
+        {showCal && (
+          <div style={{ marginTop: 10, overflowX: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11, fontFamily: "var(--mono)" }}>
+              <thead>
+                <tr style={{ borderBottom: "1px solid var(--border)" }}>
+                  {["Circuit", "k", "Writes", "Fee (DUST)", "Model"].map(h => (
+                    <th key={h} style={{ padding: "6px 8px", textAlign: "left", color: "var(--label)", fontWeight: 600 }}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {CALIBRATION.map((c, i) => {
+                  const predicted = c.writes === 0 && c.k === "—" ? FEE_NO_PROOF : estimateFee(true, c.writes);
+                  const err = c.fee > 1 ? ((predicted - c.fee) / c.fee * 100).toFixed(1) : "—";
+                  return (
+                    <tr key={i} style={{ borderBottom: "1px solid var(--section-border)" }}>
+                      <td style={{ padding: "5px 8px", color: "var(--text)" }}>{c.circuit}</td>
+                      <td style={{ padding: "5px 8px", color: "var(--muted)" }}>{c.k}</td>
+                      <td style={{ padding: "5px 8px", color: "var(--muted)" }}>{c.writes}</td>
+                      <td style={{ padding: "5px 8px", color: "var(--accent-text)", fontWeight: 600 }}>{c.fee.toFixed(2)}</td>
+                      <td style={{ padding: "5px 8px", color: Math.abs(parseFloat(err)) > 3 ? "var(--warn-text)" : "var(--muted)" }}>
+                        {predicted.toFixed(2)} ({err}%)
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
       </div>
 
-      {/* 1: DApp Profile */}
+      {/* 1: Profile */}
       <section style={{ marginBottom: 28, paddingBottom: 24, borderBottom: "1px solid var(--section-border)" }}>
         <h2 style={{ fontSize: 13, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--muted)", marginBottom: 14 }}>1 — Transaction Profile</h2>
         <Pills options={Object.entries(PROFILES).map(([k, v]) => ({ value: k, label: v.label, badge: v.badge }))} value={pk} onChange={setPk} />
         <p style={{ fontSize: 11, color: "var(--muted)", margin: "8px 0 0", fontStyle: "italic" }}>{p.desc}</p>
 
         {pk === "custom" ? (
-          <div style={{ marginTop: 14 }}>
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px 16px" }}>
-              <div>
-                <Toggle label="Application ZK proof" value={cProof} onChange={setCProof} help="Does each TX include an app-level circuit proof?" />
-                {cProof && <NumInput label="Circuit k value" value={cK} onChange={setCK} min={5} max={20} step={1} help="From zkir compile --verbose (7-12 typical)" />}
-                <NumInput label="Ledger writes / TX" value={cWrites} onChange={setCWrites} min={0} max={50} step={1} help="On-chain state mutations per TX" />
-              </div>
-              <div>
-                <NumInput label="TXs per action" value={cTxPer} onChange={setCTxPer} step={1} help="On-chain TXs per user operation" />
-                <NumInput label="Actions / day" value={cActDay} onChange={setCActDay} step={10} help="Total daily user actions" />
-              </div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px 16px", marginTop: 14 }}>
+            <div>
+              <Toggle label="Application ZK proof" value={cProof} onChange={setCProof} help="Most contract calls need a proof (~67+ DUST). Simple transfers don't (0.30 DUST)." />
+              <NumInput label="Ledger writes / TX" value={cWrites} onChange={setCWrites} min={0} max={50} step={1} help="On-chain state mutations. Adds ~0.4 DUST each." />
+            </div>
+            <div>
+              <NumInput label="TXs per action" value={cTxPer} onChange={setCTxPer} step={1} help="On-chain TXs per user operation" />
+              <NumInput label="Actions / day" value={cActDay} onChange={setCActDay} step={10} help="Total daily user actions" />
             </div>
           </div>
         ) : (
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 14 }}>
-            <Stat mini label="Proof" value={hasProof ? `k=${kVal}` : "None"} sub={hasProof ? "app circuit" : "DUST proof only"} />
-            <Stat mini label="Writes / TX" value={writes} />
+            <Stat mini label="Proof" value={hasProof ? "Yes" : "No"} sub={hasProof ? "~67+ DUST base" : "0.30 DUST"} />
+            <Stat mini label="Writes" value={writes} sub={`+${f(FEE_PER_WRITE * writes)} DUST`} />
             <Stat mini label="TXs / action" value={txPer} />
             <Stat mini label="Actions / day" value={actDay} />
           </div>
         )}
 
-        {/* Fee breakdown */}
-        <div style={{ marginTop: 14, padding: "10px 14px", borderRadius: 8, background: "var(--card-bg)", border: "1px solid var(--border)" }}>
-          <div style={{ fontSize: 11, fontWeight: 600, color: "var(--label)", marginBottom: 6 }}>Estimated fee breakdown (floor pricing)</div>
-          <div style={{ display: "flex", gap: 6, alignItems: "center", fontFamily: "var(--mono)", fontSize: 12 }}>
-            <span style={{ color: "var(--muted)" }}>DUST proof:</span>
-            <span style={{ color: "var(--text)" }}>{f(r.dustProofCost)}</span>
-            <span style={{ color: "var(--muted)" }}>+</span>
-            <span style={{ color: "var(--muted)" }}>App proof:</span>
-            <span style={{ color: r.appProofCost > 0 ? "var(--text)" : "var(--muted)" }}>{f(r.appProofCost)}</span>
-            <span style={{ color: "var(--muted)" }}>+</span>
-            <span style={{ color: "var(--muted)" }}>Writes:</span>
-            <span style={{ color: "var(--text)" }}>{f(r.writeCost)}</span>
-            <span style={{ color: "var(--muted)" }}>=</span>
-            <span style={{ color: "var(--accent-text)", fontWeight: 700 }}>~{f(r.feeFloor)} DUST</span>
-          </div>
-          <div style={{ fontSize: 10, color: "var(--muted)", marginTop: 4, fontStyle: "italic" }}>
-            Model: {f(FEE_FLOOR)} base + {f(EST_PROOF_COST_PER_K)}/k-level + {f(EST_WRITE_COST)}/write. Calibrated from 2 data points — will improve with more explorer data.
-          </div>
+        <div style={{ marginTop: 12, padding: "8px 12px", borderRadius: 6, background: "var(--card-bg)", border: "1px solid var(--border)", fontFamily: "var(--mono)", fontSize: 13 }}>
+          <span style={{ color: "var(--muted)" }}>Est. fee/TX: </span>
+          <span style={{ color: "var(--accent-text)", fontWeight: 700 }}>~{f(r.feeFloor)} DUST</span>
+          <span style={{ color: "var(--muted)", fontSize: 11 }}> ({hasProof ? `${f(FEE_WITH_PROOF_BASE)} proof base + ${f(FEE_PER_WRITE * writes)} writes` : "no app proof"})</span>
         </div>
       </section>
 
@@ -326,18 +346,18 @@ export default function DustBudgetCalculator() {
         </div>
       </section>
 
-      {/* 3: Burn Rate */}
+      {/* 3: Burn */}
       <section style={{ marginBottom: 28, paddingBottom: 24, borderBottom: "1px solid var(--section-border)" }}>
         <h2 style={{ fontSize: 13, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--muted)", marginBottom: 14 }}>3 — DUST Burn Rate</h2>
         <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 12 }}>
           <Stat label="Fee / TX" value={`~${f(r.fee)} DUST`}
-            sub={r.congMult > 1 ? `${r.congMult.toFixed(1)}× floor` : "At floor pricing"}
+            sub={r.congMult > 1 ? `${r.congMult.toFixed(1)}× floor` : "Floor pricing"}
             warn={r.congMult > 2} />
           <Stat label="Daily burn" value={`${f(r.dBurn)} DUST`} sub={`${fi(r.dailyTx)} TXs/day`} />
         </div>
         {r.congMult > 1 && (
           <div style={{ fontSize: 11, color: "var(--warn-text)", marginBottom: 12, padding: "8px 12px", borderRadius: 6, background: "var(--warn-bg)", border: "1px solid var(--warn-border)" }}>
-            Congestion: {f(r.feeFloor)} → {f(r.fee)} DUST/TX (price multiplier: {r.priceMult.toFixed(2)}×). ±4.6%/block every 6s.
+            Congestion: ~{f(r.feeFloor)} → ~{f(r.fee)} DUST/TX ({r.priceMult.toFixed(2)}× price). ±4.6%/block every 6s.
           </div>
         )}
         <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
@@ -346,7 +366,7 @@ export default function DustBudgetCalculator() {
         </div>
       </section>
 
-      {/* 4: NIGHT Requirement */}
+      {/* 4: NIGHT */}
       <section style={{ marginBottom: 28, paddingBottom: 24, borderBottom: "1px solid var(--section-border)" }}>
         <h2 style={{ fontSize: 13, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--muted)", marginBottom: 14 }}>4 — NIGHT Holdings Required</h2>
         <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 16 }}>
@@ -356,14 +376,12 @@ export default function DustBudgetCalculator() {
         <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 12 }}>
           <Stat mini label="Regen / burn"
             value={`${r.ratio.toFixed(2)}×`}
-            sub={r.ratio >= 1.5 ? "Comfortable" : r.ratio >= 1 ? "Tight margin" : "Deficit"}
+            sub={r.ratio >= 1.5 ? "Comfortable" : r.ratio >= 1 ? "Tight" : "Deficit"}
             accent={r.ratio >= 1.5} warn={r.ratio < 1} />
           <Stat mini label="Cap runway"
             value={r.runway >= 1 ? `${f(r.runway)} days` : `${f(r.runway * 24)} hrs`}
             sub="Without regen" />
         </div>
-
-        {/* Breakdown */}
         <div style={{
           padding: "12px 16px", borderRadius: 8, fontSize: 12, lineHeight: 1.6, color: "var(--label)",
           background: r.ratio >= 1.5 ? "var(--accent-bg)" : r.ratio >= 1 ? "var(--card-bg)" : "var(--warn-bg)",
@@ -379,36 +397,33 @@ export default function DustBudgetCalculator() {
         </div>
       </section>
 
-      {/* Planning Notes */}
+      {/* Planning */}
       <section style={{ marginBottom: 28, paddingBottom: 24, borderBottom: "1px solid var(--section-border)" }}>
         <h2 style={{ fontSize: 13, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--muted)", marginBottom: 14 }}>Planning Notes</h2>
         <div style={{ padding: "14px 16px", borderRadius: 8, background: "var(--card-bg)", border: "1px solid var(--border)", fontSize: 12, lineHeight: 1.7, color: "var(--label)" }}>
-          <div style={{ marginBottom: 8 }}><strong style={{ color: "var(--text)" }}>Every TX pays for a DUST ZK proof.</strong> Even a simple NIGHT transfer costs 0.30 DUST. There are no proof-free transactions — DUST is shielded, so spending it always requires a ZK proof.</div>
-          <div style={{ marginBottom: 8 }}><strong style={{ color: "var(--text)" }}>Fees scale with circuit size + writes.</strong> Application circuit proofs (k-value) and ledger writes are the main cost drivers above the 0.30 DUST floor. A k=10 circuit with 6 writes costs ~69 DUST.</div>
-          <div style={{ marginBottom: 8 }}><strong style={{ color: "var(--text)" }}>Shielded tokens are separate from DUST.</strong> DUST only pays fees. Shielded token operations use a separate ZK subsystem and may add additional proof costs on top of the DUST fee.</div>
-          <div style={{ marginBottom: 8 }}><strong style={{ color: "var(--text)" }}>Cap runway is short at contract-level fees.</strong> At ~69 DUST/TX, your DUST cap drains fast. Budget for continuous regen and keep buffer high.</div>
-          <div style={{ marginBottom: 8 }}><strong style={{ color: "var(--text)" }}>Proof server limits throughput.</strong> ~22s per proof = ~160 proofs/hr per server (flat across k=7 to k=12). Proving time doesn't scale with circuit complexity on current hardware.</div>
-          <div><strong style={{ color: "var(--text)" }}>Use mockProve() for exact estimates.</strong> The Midnight ledger API provides <code style={{ fontSize: 10, background: "var(--input-bg)", padding: "1px 4px", borderRadius: 3 }}>Transaction.fees()</code> and <code style={{ fontSize: 10, background: "var(--input-bg)", padding: "1px 4px", borderRadius: 3 }}>mockProve()</code> for precise fee computation without a proof server.</div>
+          <div style={{ marginBottom: 8 }}><strong style={{ color: "var(--text)" }}>Two-tier fee structure.</strong> No-proof TXs: 0.30 DUST. With-proof TXs: ~66-70 DUST. The proof is the cost — circuit complexity (k-value) barely matters. Budget around TX count, not circuit size.</div>
+          <div style={{ marginBottom: 8 }}><strong style={{ color: "var(--text)" }}>Writes add marginally.</strong> Each ledger write adds ~0.4 DUST. Going from 3 to 13 writes only adds ~4 DUST (~6% of total). Optimize TX count, not writes per TX.</div>
+          <div style={{ marginBottom: 8 }}><strong style={{ color: "var(--text)" }}>Cap runway is hours, not days.</strong> At ~69 DUST/TX for contract calls, your DUST cap depletes fast. Continuous regen from NIGHT is essential — any interruption (redesignation, transfer) risks outage.</div>
+          <div style={{ marginBottom: 8 }}><strong style={{ color: "var(--text)" }}>Proving time is the throughput cap.</strong> ~22s/proof regardless of k (7-12). ~160 proofs/hr per server. Scale horizontally.</div>
+          <div><strong style={{ color: "var(--text)" }}>For exact fees:</strong> use <code style={{ fontSize: 10, background: "var(--input-bg)", padding: "1px 4px", borderRadius: 3 }}>Transaction.mockProve().fees(params)</code> from <code style={{ fontSize: 10, background: "var(--input-bg)", padding: "1px 4px", borderRadius: 3 }}>@midnight/ledger</code>.</div>
         </div>
       </section>
 
-      {/* Protocol Params */}
-      <section style={{ padding: "14px 16px", borderRadius: 8, background: "var(--card-bg)", border: "1px solid var(--border)", fontSize: 11, color: "var(--muted)", lineHeight: 1.6, marginBottom: 20 }}>
-        <div style={{ fontWeight: 600, marginBottom: 6, color: "var(--label)", fontSize: 12 }}>Protocol Parameters & Calibration</div>
+      {/* Params */}
+      <section style={{ padding: "14px 16px", borderRadius: 8, background: "var(--card-bg)", border: "1px solid var(--border)", fontSize: 11, color: "var(--muted)", lineHeight: 1.6 }}>
+        <div style={{ fontWeight: 600, marginBottom: 6, color: "var(--label)", fontSize: 12 }}>Protocol Parameters</div>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "2px 24px", fontFamily: "var(--mono)", fontSize: 11 }}>
-          <div>block_time: {BLOCK_TIME_SEC}s ({BLOCKS_PER_DAY.toLocaleString()} blk/day)</div>
-          <div>dust_per_night: {DUST_PER_NIGHT} / ~7d</div>
-          <div>overall_price_init: {INITIAL_OVERALL_PRICE}</div>
-          <div>target_fullness: 50%</div>
-          <div>fee_floor: 0.30 DUST (NIGHT xfer)</div>
-          <div>fee_mid: ~69 DUST (k=10, 6 writes)</div>
-          <div>est_proof_cost: ~{EST_PROOF_COST_PER_K}/k-level</div>
-          <div>est_write_cost: ~{EST_WRITE_COST}/write</div>
+          <div>block_time: {BLOCK_TIME_SEC}s</div>
+          <div>dust/night: {DUST_PER_NIGHT} / ~7d</div>
+          <div>fee_no_proof: 0.30 DUST</div>
+          <div>fee_with_proof: ~67-70 DUST</div>
+          <div>marginal/write: ~0.41 DUST</div>
+          <div>price_adjust: ±4.6%/blk</div>
         </div>
       </section>
 
-      <div style={{ textAlign: "center", fontSize: 10, color: "var(--muted)", paddingTop: 16, borderTop: "1px solid var(--section-border)" }}>
-        NIGHT Estimator v0.5 — Fee model: 2-point calibration (0.30 DUST floor + 69 DUST mid-range). Estimates only — use ledger API for precise fees.
+      <div style={{ textAlign: "center", fontSize: 10, color: "var(--muted)", marginTop: 20, paddingTop: 16, borderTop: "1px solid var(--section-border)" }}>
+        NIGHT Estimator v0.6 — 5-point calibration (preprod explorer). Fee ≈ 67 + 0.41/write (with proof) or 0.30 (no proof). Use ledger API for exact fees.
       </div>
     </div>
   );
