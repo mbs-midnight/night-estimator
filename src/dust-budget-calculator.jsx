@@ -217,6 +217,7 @@ export default function DustBudgetCalculator() {
     return {
       feeFloor, fee, dailyTx, dBurn, wBurn, mBurn,
       nFlow, nCap, minN, recN,
+      eqNight: dBurn / DUST_PER_NIGHT_PER_DAY, // Exact equilibrium: regen == burn
       congMult: priceMult, cap,
       runway: cap / dBurn, ratio: dRegen / dBurn, dRegen,
       bind: nFlow >= nCap ? "Generation rate" : "DUST cap",
@@ -253,7 +254,7 @@ export default function DustBudgetCalculator() {
         <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6 }}>
           <div style={{ width: 32, height: 32, borderRadius: "50%", border: "2px solid var(--accent-border)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 14 }}>◑</div>
           <h1 style={{ fontSize: 22, fontWeight: 700, margin: 0, letterSpacing: "-0.02em" }}>NIGHT Estimator</h1>
-          <span style={{ fontSize: 10, fontWeight: 600, background: "var(--accent-border)", color: "#fff", padding: "2px 8px", borderRadius: 10 }}>v0.6</span>
+          <span style={{ fontSize: 10, fontWeight: 600, background: "var(--accent-border)", color: "#fff", padding: "2px 8px", borderRadius: 10 }}>v0.8</span>
         </div>
         <p style={{ fontSize: 13, color: "var(--muted)", margin: 0, lineHeight: 1.5 }}>
           Estimate NIGHT holdings to sustain DApp operations on Midnight.
@@ -301,6 +302,33 @@ export default function DustBudgetCalculator() {
             </table>
           </div>
         )}
+      </div>
+
+      {/* ═══ HERO: Infinite Runway Target ═══ */}
+      <div style={{
+        padding: "24px 20px", borderRadius: 12, marginBottom: 28,
+        background: r.ratio >= 1 ? "var(--accent-bg)" : "var(--warn-bg)",
+        border: `2px solid ${r.ratio >= 1 ? "var(--accent-border)" : "var(--warn-border)"}`,
+        textAlign: "center",
+      }}>
+        <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "1.5px", color: "var(--muted)", marginBottom: 10 }}>
+          Infinite Runway Target
+        </div>
+        <div style={{ fontSize: 44, fontWeight: 800, fontFamily: "var(--mono)", color: "var(--text)", lineHeight: 1.1 }}>
+          {fi(r.recN)}
+          <span style={{ fontSize: 20, fontWeight: 600, color: "var(--accent-text)", marginLeft: 8 }}>NIGHT</span>
+        </div>
+        <div style={{ fontSize: 12, color: "var(--label)", marginTop: 10, lineHeight: 1.5 }}>
+          Hold this amount to generate DUST faster than you burn it — indefinitely.
+        </div>
+        <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 6 }}>
+          Burn: <strong style={{ color: "var(--text)" }}>{f(r.dBurn)}</strong> DUST/day
+          {" · "}Regen: <strong style={{ color: "var(--text)" }}>{f(r.dRegen)}</strong> DUST/day
+          {" · "}Surplus: <strong style={{ color: r.ratio >= 1 ? "var(--accent-text)" : "var(--warn-text)" }}>{r.ratio >= 1 ? "+" : ""}{f(r.dRegen - r.dBurn)}</strong>/day
+        </div>
+        <div style={{ fontSize: 10, color: "var(--muted)", marginTop: 8, borderTop: `1px solid ${r.ratio >= 1 ? "var(--accent-border)" : "var(--warn-border)"}`, paddingTop: 8 }}>
+          Equilibrium: {fi(r.eqNight)} NIGHT (exact break-even) · Shown: +{buf}% buffer
+        </div>
       </div>
 
       {/* 1: Profile */}
@@ -374,14 +402,12 @@ export default function DustBudgetCalculator() {
         </div>
       </section>
 
-      {/* 4: NIGHT */}
+      {/* 4: NIGHT Detail */}
       <section style={{ marginBottom: 28, paddingBottom: 24, borderBottom: "1px solid var(--section-border)" }}>
-        <h2 style={{ fontSize: 13, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--muted)", marginBottom: 14 }}>4 — NIGHT Holdings Required</h2>
-        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 16 }}>
-          <Stat label="Minimum NIGHT" value={fi(r.minN)} sub={`Binding: ${r.bind}`} />
-          <Stat label={`Recommended (+${buf}%)`} value={fi(r.recN)} sub="With safety margin" accent />
-        </div>
+        <h2 style={{ fontSize: 13, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--muted)", marginBottom: 14 }}>4 — Sustainability Breakdown</h2>
         <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 12 }}>
+          <Stat mini label="Equilibrium" value={fi(r.eqNight)} sub="Exact break-even" />
+          <Stat mini label={`+${buf}% buffer`} value={fi(r.recN)} sub="Recommended" accent />
           <Stat mini label="Regen / burn"
             value={`${r.ratio.toFixed(2)}×`}
             sub={r.ratio >= 1.5 ? "Comfortable" : r.ratio >= 1 ? "Tight" : "Deficit"}
@@ -433,7 +459,7 @@ export default function DustBudgetCalculator() {
       </section>
 
       <div style={{ textAlign: "center", fontSize: 10, color: "var(--muted)", marginTop: 20, paddingTop: 16, borderTop: "1px solid var(--section-border)" }}>
-        NIGHT Estimator v0.6 — 5-point calibration. Fee ≈ 0.30 DUST (DUST proof only) or ~67 + 0.41/write (with app circuit). All TXs require a ZK proof.
+        NIGHT Estimator v0.8 — Infinite Runway model. 5-point calibration. Fee ≈ ~68 DUST (app circuit) or 0.30 (DUST proof only).
       </div>
     </div>
   );
