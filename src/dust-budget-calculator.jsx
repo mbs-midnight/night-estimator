@@ -69,6 +69,8 @@ function estimateFee(hasAppProof, writes = 5) {
 // These are planning estimates. Actual multipliers depend on duration and demand elasticity.
 
 // ─── DApp Profiles ───
+// Volume is calibrated so heavier profiles cost more NIGHT (complexity × reasonable volume).
+// Operators should use Custom mode for their specific throughput.
 const PROFILES = {
   custom: {
     label: "Custom", desc: "Define your own transaction pattern",
@@ -76,28 +78,28 @@ const PROFILES = {
   },
   nightTransfer: {
     label: "NIGHT Transfer",
-    desc: "Simple token transfer. Requires a DUST spend proof (all TXs do) but no application circuit — 0.30 DUST confirmed.",
+    desc: "Simple token transfer. DUST spend proof only — 0.30 DUST confirmed. Example: 1,000 transfers/day.",
     hasProof: false, writes: 0, txPerAction: 1, actionsPerDay: 1000, badge: "✓",
   },
   pokerTable: {
     label: "Poker (2P)",
-    desc: "Dominion Poker: ~15.7 TXs/game, ~4.8 games/hr. Fee ~66-70 DUST/TX across all circuits (k=7-12, 3-13 writes).",
+    desc: "Dominion Poker: ~15.7 TXs/game, ~4.8 games/hr, running 24/7. Fee ~66-70 DUST/TX.",
     hasProof: true, writes: 6, txPerAction: 15.7, actionsPerDay: 115, badge: "✓",
   },
   lightContract: {
     label: "Light Contract",
-    desc: "Simple DApp — small circuit, few writes. Fee still ~67-68 DUST (app circuit proof dominates).",
-    hasProof: true, writes: 2, txPerAction: 2, actionsPerDay: 500,
+    desc: "Simple DApp — small circuit, few writes. ~67 DUST/TX. Example: 200 user actions/day, 1 TX each.",
+    hasProof: true, writes: 2, txPerAction: 1, actionsPerDay: 200,
   },
   mediumContract: {
     label: "Medium Contract",
-    desc: "DEX/lending — moderate writes. Fee ~68-70 DUST.",
-    hasProof: true, writes: 6, txPerAction: 4, actionsPerDay: 200,
+    desc: "DEX/lending — moderate writes. ~69 DUST/TX. Example: 200 user actions/day, 3 TXs each.",
+    hasProof: true, writes: 6, txPerAction: 3, actionsPerDay: 200,
   },
   heavyContract: {
     label: "Heavy Contract",
-    desc: "Complex operations — many writes. Fee ~72-75 DUST (writes add marginally).",
-    hasProof: true, writes: 15, txPerAction: 8, actionsPerDay: 50,
+    desc: "Complex multi-step operations — many writes. ~73 DUST/TX. Example: 200 user actions/day, 8 TXs each.",
+    hasProof: true, writes: 15, txPerAction: 8, actionsPerDay: 200,
   },
 };
 
