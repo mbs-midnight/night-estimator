@@ -5,113 +5,53 @@ const DUST_PER_NIGHT = 5;
 const TIME_TO_CAP_SECONDS = 604814;
 const DUST_PER_NIGHT_PER_DAY = DUST_PER_NIGHT / (TIME_TO_CAP_SECONDS / 86400);
 const BLOCK_TIME_SEC = 6;
+const BLOCKS_PER_MIN = 60 / BLOCK_TIME_SEC;
 const BLOCKS_PER_DAY = Math.floor(86400 / BLOCK_TIME_SEC);
-const INITIAL_OVERALL_PRICE = 10;
-const MAX_ADJUSTMENT = 0.04595;
-const SENSITIVITY_A = 100;
+const BLOCK_SIZE_LIMIT = 200_000; // bytes
+const AVG_TX_SIZE = 6759; // bytes — observed from mainnet CSV
+const MAX_TX_PER_BLOCK = Math.floor(BLOCK_SIZE_LIMIT / AVG_TX_SIZE);
+const MAX_TX_PER_MIN = MAX_TX_PER_BLOCK * BLOCKS_PER_MIN;
+const PROVING_TIME_SEC = 22;
+const LOCK_DURATION_SEC = 28; // proving + submission + acceptance
+const PROOFS_PER_HOUR_PER_SERVER = Math.floor(3600 / PROVING_TIME_SEC);
+const MAX_WALLETS_PER_PROOF_SERVER = 3;
 
-// ─── FEE MODEL (calibrated from 5 preprod data points) ───
-//
-// Observed fees (Midnight preprod explorer, Dominion Poker):
-//   commit_action_state  k=7   3 writes   0.6631 DUST
-//   post_small_blind     k=11  5 writes   0.6863 DUST
-//   post_big_blind       k=10  6 writes   ~0.69  DUST
-//   commit_deck_cards    k=10  13 writes  0.7042 DUST
-//   NIGHT transfer       —     0 writes   0.30  DUST
-//
-// Key finding: fees are nearly flat (~0.66-0.70 DUST, ±3%) across all contract
-// circuits regardless of k-value (7-12) or write count (3-13).
-// Fee is dominated by a large constant (proof verification + TX base cost).
-// k and writes contribute only marginally.
-//
-// Two-tier model:
-//   - No app circuit (NIGHT transfer, DUST proof only): 0.30 DUST
-//   - With app circuit (contract call, DUST proof + app proof): ~0.68 DUST
-//
-// Marginal effects (small but observable):
-//   - Per write: ~0.004 DUST (from 0.6631@3writes to 0.7042@13writes ≈ 0.0041/write)
-//   - Per k-level: negligible (dominated by constant)
+// ─── Fee Model ───
+const FEE_NO_PROOF = 0.30;
+const FEE_WITH_PROOF_BASE = 0.67;
+const FEE_PER_WRITE = 0.0041;
 
-const FEE_NO_PROOF = 0.30;          // NIGHT transfer — confirmed
-const FEE_WITH_PROOF_BASE = 0.67;   // Base cost for any TX with app proof
-const FEE_PER_WRITE = 0.0041;         // Marginal cost per ledger write (derived from data)
-const FEE_WITH_PROOF_AVG = 0.685;    // Simple average for quick estimates
-
-// Observed data for calibration display
 const CALIBRATION = [
-  { circuit: "NIGHT transfer", k: "—", writes: 0, fee: 0.30, confirmed: true },
-  { circuit: "commit_action_state", k: 7, writes: 3, fee: 0.6631, confirmed: true },
-  { circuit: "post_small_blind", k: 11, writes: 5, fee: 0.6863, confirmed: true },
-  { circuit: "post_big_blind", k: 10, writes: 6, fee: 0.69, confirmed: true },
-  { circuit: "commit_deck_cards", k: 10, writes: 13, fee: 0.7042, confirmed: true },
+  { circuit: "NIGHT transfer", k: "—", writes: 0, fee: 0.30 },
+  { circuit: "commit_action_state", k: 7, writes: 3, fee: 0.6631 },
+  { circuit: "post_small_blind", k: 11, writes: 5, fee: 0.6863 },
+  { circuit: "post_big_blind", k: 10, writes: 6, fee: 0.69 },
+  { circuit: "commit_deck_cards", k: 10, writes: 13, fee: 0.7042 },
 ];
 
-function estimateFee(hasAppProof, writes = 5) {
-  if (!hasAppProof) return FEE_NO_PROOF;
+function estimateFee(hasProof, writes = 5) {
+  if (!hasProof) return FEE_NO_PROOF;
   return FEE_WITH_PROOF_BASE + FEE_PER_WRITE * writes;
 }
 
-// ─── Congestion Model ───
-// The dynamic pricing adjusts ±4.6% per block based on previous block fullness.
-// At 50% target: no adjustment (equilibrium). Below 50%: prices decline to floor.
-// Above 50%: prices rise. But rising prices suppress demand → blocks empty → prices cool.
-//
-// Rather than simulating runaway compounding (unrealistic — ignores the feedback loop),
-// we model realistic steady-state fee multipliers at each utilization level.
-// These represent what an operator should budget for at sustained utilization:
-//
-// - Floor/Low/Target (<= 50%): Prices at or declining toward floor. Multiplier = 1×.
-//   The system is designed to stabilize at 50%. Below that, no fee pressure.
-// - Moderate (60%): Mild sustained pressure. ~1.5× floor over minutes.
-// - High (75%): Sustained congestion. ~3-5× floor (fees rise until demand drops).
-// - Spike (90%): Short burst. ~8-15× floor (aggressive but self-correcting in <2min).
-//
-// These are planning estimates. Actual multipliers depend on duration and demand elasticity.
-
-// ─── DApp Profiles ───
-// Volume is calibrated so heavier profiles cost more NIGHT (complexity × reasonable volume).
-// Operators should use Custom mode for their specific throughput.
+// ─── Profiles ───
 const PROFILES = {
-  custom: {
-    label: "Custom", desc: "Define your own transaction pattern",
-    hasProof: true, writes: 5, txPerAction: 5, actionsPerDay: 200,
-  },
-  nightTransfer: {
-    label: "NIGHT Transfer",
-    desc: "Simple token transfer. DUST spend proof only — 0.30 DUST confirmed. Example: 1,000 transfers/day.",
-    hasProof: false, writes: 0, txPerAction: 1, actionsPerDay: 1000, badge: "✓",
-  },
-  pokerTable: {
-    label: "Poker (2P)",
-    desc: "Dominion Poker: ~15.7 TXs/game, ~4.8 games/hr, running 24/7. Fee ~0.66-0.70 DUST/TX.",
-    hasProof: true, writes: 6, txPerAction: 15.7, actionsPerDay: 115, badge: "✓",
-  },
-  lightContract: {
-    label: "Light Contract",
-    desc: "Simple DApp — small circuit, few writes. ~0.67 DUST/TX. Example: 200 user actions/day, 1 TX each.",
-    hasProof: true, writes: 2, txPerAction: 1, actionsPerDay: 200,
-  },
-  mediumContract: {
-    label: "Medium Contract",
-    desc: "DEX/lending — moderate writes. ~0.69 DUST/TX. Example: 200 user actions/day, 3 TXs each.",
-    hasProof: true, writes: 6, txPerAction: 3, actionsPerDay: 200,
-  },
-  heavyContract: {
-    label: "Heavy Contract",
-    desc: "Complex multi-step operations — many writes. ~0.73 DUST/TX. Example: 200 user actions/day, 8 TXs each.",
-    hasProof: true, writes: 15, txPerAction: 8, actionsPerDay: 200,
-  },
+  custom: { label: "Custom", desc: "Define your own pattern", hasProof: true, writes: 5, txPerAction: 5, actionsPerDay: 200 },
+  nightTransfer: { label: "NIGHT Transfer", desc: "DUST spend proof only — 0.30 DUST.", hasProof: false, writes: 0, txPerAction: 1, actionsPerDay: 1000, badge: "✓" },
+  pokerTable: { label: "Poker (2P)", desc: "~15.7 TXs/game, ~4.8 games/hr. ~0.66-0.70 DUST/TX.", hasProof: true, writes: 6, txPerAction: 15.7, actionsPerDay: 115, badge: "✓" },
+  lightContract: { label: "Light Contract", desc: "Simple DApp. ~0.67 DUST/TX. 200 actions/day, 1 TX each.", hasProof: true, writes: 2, txPerAction: 1, actionsPerDay: 200 },
+  mediumContract: { label: "Medium Contract", desc: "DEX/lending. ~0.69 DUST/TX. 200 actions/day, 3 TXs each.", hasProof: true, writes: 6, txPerAction: 3, actionsPerDay: 200 },
+  heavyContract: { label: "Heavy Contract", desc: "Complex ops. ~0.73 DUST/TX. 200 actions/day, 8 TXs each.", hasProof: true, writes: 15, txPerAction: 8, actionsPerDay: 200 },
 };
 
 const CONGESTION = {
-  floor:  { label: "Floor (current)", mult: 1,  desc: "Near-empty blocks — preprod baseline. Best case." },
-  low:    { label: "Low (~25%)",      mult: 1,  desc: "Below target — prices declining toward floor. Same as floor for planning." },
-  target: { label: "Target (~50%)",   mult: 1,  desc: "Network equilibrium. No price adjustment. Plan here for steady-state mainnet." },
-  high:   { label: "High (~75%)",     mult: 4,  desc: "Sustained congestion. Fees ~4× floor — demand/price feedback limits runaway." },
-  spike:  { label: "Spike (~90%)",    mult: 10, desc: "Short burst (~minutes). Fees ~10× floor — self-corrects as demand drops." },
+  floor: { label: "Floor", mult: 1, desc: "Near-empty blocks. Best case." },
+  target: { label: "Target (50%)", mult: 1, desc: "Network equilibrium. Plan here." },
+  high: { label: "High (75%)", mult: 4, desc: "Sustained congestion. 4× fees." },
+  spike: { label: "Spike (90%)", mult: 10, desc: "Short burst. 10× fees." },
 };
 
-// ─── UI ───
+// ─── UI Components ───
 function NumInput({ label, value, onChange, unit, min = 0, step = 1, help, max }) {
   return (
     <div style={{ marginBottom: 12 }}>
@@ -133,14 +73,8 @@ function Toggle({ label, value, onChange, help }) {
   return (
     <div style={{ marginBottom: 12 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }} onClick={() => onChange(!value)}>
-        <div style={{
-          width: 36, height: 20, borderRadius: 10, padding: 2, transition: "background 0.2s",
-          background: value ? "var(--accent-border)" : "var(--border)",
-        }}>
-          <div style={{
-            width: 16, height: 16, borderRadius: 8, background: "#fff", transition: "transform 0.2s",
-            transform: value ? "translateX(16px)" : "translateX(0)",
-          }} />
+        <div style={{ width: 36, height: 20, borderRadius: 10, padding: 2, transition: "background 0.2s", background: value ? "var(--accent-border)" : "var(--border)" }}>
+          <div style={{ width: 16, height: 16, borderRadius: 8, background: "#fff", transition: "transform 0.2s", transform: value ? "translateX(16px)" : "translateX(0)" }} />
         </div>
         <label style={{ fontSize: 13, fontWeight: 500, color: "var(--label)", cursor: "pointer" }}>{label}</label>
       </div>
@@ -173,10 +107,7 @@ function Pills({ options, value, onChange }) {
           color: value === o.value ? "var(--accent-text)" : "var(--text)",
           fontWeight: value === o.value ? 600 : 400, position: "relative",
         }}>
-          {o.badge && <span style={{
-            position: "absolute", top: -6, right: -4, fontSize: 8, fontWeight: 700,
-            background: "var(--accent-border)", color: "#fff", padding: "1px 5px", borderRadius: 6,
-          }}>{o.badge}</span>}
+          {o.badge && <span style={{ position: "absolute", top: -6, right: -4, fontSize: 8, fontWeight: 700, background: "var(--accent-border)", color: "#fff", padding: "1px 5px", borderRadius: 6 }}>{o.badge}</span>}
           {o.label}
         </button>
       ))}
@@ -184,8 +115,24 @@ function Pills({ options, value, onChange }) {
   );
 }
 
-// ─── Main ───
-export default function DustBudgetCalculator() {
+// ─── Format helpers ───
+const f = (n, d = 2) => {
+  if (n === 0) return "0";
+  if (n < 0.01) return n.toFixed(4);
+  if (n >= 1e9) return (n / 1e9).toFixed(1) + "B";
+  if (n >= 1e6) return (n / 1e6).toFixed(1) + "M";
+  if (n >= 1e3) return n.toLocaleString(undefined, { maximumFractionDigits: d });
+  return n.toFixed(d);
+};
+const fi = n => Math.ceil(n).toLocaleString();
+
+// ═══════════════════════════════════════════════════════════
+// MAIN APP
+// ═══════════════════════════════════════════════════════════
+export default function NightEstimator() {
+  const [mode, setMode] = useState("budget"); // "budget" | "concurrency"
+
+  // Budget mode state
   const [pk, setPk] = useState("mediumContract");
   const [cProof, setCProof] = useState(true);
   const [cWrites, setCWrites] = useState(5);
@@ -195,6 +142,15 @@ export default function DustBudgetCalculator() {
   const [buf, setBuf] = useState(25);
   const [showCal, setShowCal] = useState(false);
 
+  // Concurrency mode state
+  const [concUsers, setConcUsers] = useState(10);
+  const [txPerUserBurst, setTxPerUserBurst] = useState(1);
+  const [burstIntervalSec, setBurstIntervalSec] = useState(30);
+  const [dustPerUtxo, setDustPerUtxo] = useState(10000);
+  const [hasProofConc, setHasProofConc] = useState(true);
+  const [writesConc, setWritesConc] = useState(6);
+
+  // Budget mode computation
   const p = PROFILES[pk];
   const cong = CONGESTION[ck];
   const hasProof = pk === "custom" ? cProof : p.hasProof;
@@ -202,7 +158,7 @@ export default function DustBudgetCalculator() {
   const txPer = pk === "custom" ? cTxPer : p.txPerAction;
   const actDay = pk === "custom" ? cActDay : p.actionsPerDay;
 
-  const r = useMemo(() => {
+  const budgetResults = useMemo(() => {
     const feeFloor = estimateFee(hasProof, writes);
     const priceMult = cong.mult;
     const fee = feeFloor * priceMult;
@@ -217,34 +173,88 @@ export default function DustBudgetCalculator() {
     const cap = recN * DUST_PER_NIGHT;
     const dRegen = recN * DUST_PER_NIGHT_PER_DAY;
     return {
-      feeFloor, fee, dailyTx, dBurn, wBurn, mBurn,
-      nFlow, nCap, minN, recN,
-      eqNight: dBurn / DUST_PER_NIGHT_PER_DAY, // Exact equilibrium: regen == burn
+      feeFloor, fee, dailyTx, dBurn, wBurn, mBurn, nFlow, nCap, minN, recN,
+      eqNight: dBurn / DUST_PER_NIGHT_PER_DAY,
       congMult: priceMult, cap,
       runway: cap / dBurn, ratio: dRegen / dBurn, dRegen,
       bind: nFlow >= nCap ? "Generation rate" : "DUST cap",
     };
   }, [hasProof, writes, txPer, actDay, ck, cong, buf]);
 
-  const f = (n, d = 2) => {
-    if (n === 0) return "0";
-    if (n < 0.01) return n.toFixed(4);
-    if (n >= 1e9) return (n / 1e9).toFixed(1) + "B";
-    if (n >= 1e6) return (n / 1e6).toFixed(1) + "M";
-    if (n >= 1e3) return n.toLocaleString(undefined, { maximumFractionDigits: d });
-    return n.toFixed(d);
+  // Concurrency mode computation
+  const concResults = useMemo(() => {
+    const feePerTx = estimateFee(hasProofConc, writesConc);
+    const txPerMinPerUtxo = 60 / LOCK_DURATION_SEC;
+
+    // UTXOs needed for concurrency
+    const utxosPerUser = Math.ceil(txPerUserBurst * (LOCK_DURATION_SEC / burstIntervalSec));
+    const utxosNeeded = concUsers * Math.max(utxosPerUser, 1);
+
+    // Throughput
+    const maxTxPerMin = utxosNeeded * txPerMinPerUtxo;
+    const chainLimited = maxTxPerMin > MAX_TX_PER_MIN;
+    const effectiveTxPerMin = Math.min(maxTxPerMin, MAX_TX_PER_MIN);
+
+    // Proof servers needed
+    const proofServersForThroughput = Math.ceil(effectiveTxPerMin * 60 / PROOFS_PER_HOUR_PER_SERVER);
+    const proofServersForWallets = Math.ceil(utxosNeeded / MAX_WALLETS_PER_PROOF_SERVER / 30); // rough: each server handles ~30 UTXOs across ~3 wallets
+    const proofServersNeeded = Math.max(proofServersForThroughput, 1);
+
+    // Bottleneck identification
+    const utxoCapacity = utxosNeeded * txPerMinPerUtxo;
+    const chainCapacity = MAX_TX_PER_MIN;
+    const proofCapacity = proofServersNeeded * PROOFS_PER_HOUR_PER_SERVER / 60;
+    const bottleneck = chainCapacity <= utxoCapacity && chainCapacity <= proofCapacity ? "Chain (block size)"
+      : proofCapacity <= utxoCapacity ? "Proof server throughput"
+      : "DUST UTXO concurrency";
+
+    // NIGHT requirements
+    // Each UTXO = 1 NIGHT UTXO. Total NIGHT needed = enough for DUST balance + enough UTXOs
+    const nightPerUtxo = dustPerUtxo / DUST_PER_NIGHT; // NIGHT needed per UTXO to fill its DUST cap
+    const totalNight = utxosNeeded * nightPerUtxo;
+
+    // DUST sustainability
+    const dailyTxAtCapacity = effectiveTxPerMin * 60 * 24;
+    const dailyBurn = dailyTxAtCapacity * feePerTx;
+    const dailyRegen = totalNight * DUST_PER_NIGHT_PER_DAY;
+    const sustainable = dailyRegen >= dailyBurn;
+
+    // How long DUST lasts per UTXO without regen
+    const txPerUtxoBeforeDry = dustPerUtxo / feePerTx;
+    const utxoRunwayMin = txPerUtxoBeforeDry / txPerMinPerUtxo;
+
+    // Chain saturation: how many UTXOs to max out the chain
+    const utxosToSaturate = Math.ceil(MAX_TX_PER_MIN / txPerMinPerUtxo);
+
+    return {
+      feePerTx, txPerMinPerUtxo,
+      utxosPerUser, utxosNeeded,
+      maxTxPerMin, effectiveTxPerMin, chainLimited,
+      proofServersNeeded, bottleneck,
+      nightPerUtxo, totalNight,
+      dailyTxAtCapacity, dailyBurn, dailyRegen, sustainable,
+      txPerUtxoBeforeDry, utxoRunwayMin,
+      utxosToSaturate,
+    };
+  }, [concUsers, txPerUserBurst, burstIntervalSec, dustPerUtxo, hasProofConc, writesConc]);
+
+  const r = budgetResults;
+  const c = concResults;
+
+  // ─── CSS Variables ───
+  const cssVars = {
+    "--text": "#E8E6E3", "--label": "#B0ADA8", "--muted": "#7A7672",
+    "--bg": "#1A1917", "--card-bg": "#232220", "--input-bg": "#1E1D1B",
+    "--border": "#3A3835", "--accent-bg": "#1B2A1F", "--accent-border": "#2D5A3A",
+    "--accent-text": "#6BCB7F", "--warn-bg": "#2A1F1B", "--warn-border": "#5A3A2D",
+    "--warn-text": "#E8944A", "--section-border": "#2A2826",
+    "--testnet-bg": "#1B1F2A", "--testnet-border": "#2D3A5A", "--testnet-text": "#7BA4E8",
+    "--mono": "'JetBrains Mono', monospace",
   };
-  const fi = n => Math.ceil(n).toLocaleString();
 
   return (
     <div style={{
-      "--text": "#E8E6E3", "--label": "#B0ADA8", "--muted": "#7A7672",
-      "--bg": "#1A1917", "--card-bg": "#232220", "--input-bg": "#1E1D1B",
-      "--border": "#3A3835", "--accent-bg": "#1B2A1F", "--accent-border": "#2D5A3A",
-      "--accent-text": "#6BCB7F", "--warn-bg": "#2A1F1B", "--warn-border": "#5A3A2D",
-      "--warn-text": "#E8944A", "--section-border": "#2A2826",
-      "--testnet-bg": "#1B1F2A", "--testnet-border": "#2D3A5A", "--testnet-text": "#7BA4E8",
-      "--mono": "'JetBrains Mono', monospace",
+      ...cssVars,
       fontFamily: "'Inter', -apple-system, system-ui, sans-serif",
       color: "var(--text)", background: "var(--bg)",
       minHeight: "100vh", padding: "24px 20px", maxWidth: 740, margin: "0 auto",
@@ -252,216 +262,287 @@ export default function DustBudgetCalculator() {
       <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet" />
 
       {/* Header */}
-      <div style={{ marginBottom: 28 }}>
+      <div style={{ marginBottom: 20 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6 }}>
           <div style={{ width: 32, height: 32, borderRadius: "50%", border: "2px solid var(--accent-border)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 14 }}>◑</div>
           <h1 style={{ fontSize: 22, fontWeight: 700, margin: 0, letterSpacing: "-0.02em" }}>NIGHT Estimator</h1>
-          <span style={{ fontSize: 10, fontWeight: 600, background: "var(--accent-border)", color: "#fff", padding: "2px 8px", borderRadius: 10 }}>v0.9</span>
+          <span style={{ fontSize: 10, fontWeight: 600, background: "var(--accent-border)", color: "#fff", padding: "2px 8px", borderRadius: 10 }}>v1.0</span>
         </div>
-        <p style={{ fontSize: 13, color: "var(--muted)", margin: 0, lineHeight: 1.5 }}>
-          Estimate NIGHT holdings to sustain DApp operations on Midnight.
-        </p>
+        <p style={{ fontSize: 13, color: "var(--muted)", margin: 0 }}>DUST budget &amp; concurrency planning for Midnight DApp operators.</p>
       </div>
 
-      {/* Key insight banner */}
-      <div style={{ padding: "12px 16px", borderRadius: 8, marginBottom: 24, background: "var(--testnet-bg)", border: "1px solid var(--testnet-border)" }}>
-        <div style={{ fontSize: 12, fontWeight: 600, color: "var(--testnet-text)", marginBottom: 4 }}>
-          Fee structure — confirmed from 5 preprod data points
-        </div>
-        <div style={{ fontSize: 11, color: "var(--muted)", lineHeight: 1.6 }}>
-          <strong style={{ color: "var(--testnet-text)" }}>Two tiers:</strong> NIGHT transfers cost <strong style={{ color: "var(--testnet-text)" }}>0.30 DUST</strong> (DUST spend proof only, no app circuit). Contract calls cost <strong style={{ color: "var(--testnet-text)" }}>~0.66-0.70 DUST</strong> (DUST proof + application circuit proof) regardless of circuit complexity (k=7 to k=12, 3 to 13 writes — only ±3% variation). The app circuit proof dominates; writes add ~0.004 DUST each.
-          <span style={{ display: "inline-block", marginLeft: 4, cursor: "pointer", color: "var(--testnet-text)", textDecoration: "underline", fontSize: 10 }} onClick={() => setShowCal(!showCal)}>
-            {showCal ? "hide data ▲" : "show data ▼"}
-          </span>
-        </div>
-        {showCal && (
-          <div style={{ marginTop: 10, overflowX: "auto" }}>
-            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11, fontFamily: "var(--mono)" }}>
-              <thead>
-                <tr style={{ borderBottom: "1px solid var(--border)" }}>
-                  {["Circuit", "k", "Writes", "Fee (DUST)", "Model"].map(h => (
-                    <th key={h} style={{ padding: "6px 8px", textAlign: "left", color: "var(--label)", fontWeight: 600 }}>{h}</th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {CALIBRATION.map((c, i) => {
-                  const predicted = c.writes === 0 && c.k === "—" ? FEE_NO_PROOF : estimateFee(true, c.writes);
-                  const err = c.fee > 1 ? ((predicted - c.fee) / c.fee * 100).toFixed(1) : "—";
-                  return (
-                    <tr key={i} style={{ borderBottom: "1px solid var(--section-border)" }}>
-                      <td style={{ padding: "5px 8px", color: "var(--text)" }}>{c.circuit}</td>
-                      <td style={{ padding: "5px 8px", color: "var(--muted)" }}>{c.k}</td>
-                      <td style={{ padding: "5px 8px", color: "var(--muted)" }}>{c.writes}</td>
-                      <td style={{ padding: "5px 8px", color: "var(--accent-text)", fontWeight: 600 }}>{c.fee.toFixed(2)}</td>
-                      <td style={{ padding: "5px 8px", color: Math.abs(parseFloat(err)) > 3 ? "var(--warn-text)" : "var(--muted)" }}>
-                        {predicted.toFixed(2)} ({err}%)
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-        )}
+      {/* Mode Toggle */}
+      <div style={{ display: "flex", gap: 0, marginBottom: 24, borderRadius: 10, overflow: "hidden", border: "1px solid var(--border)" }}>
+        {[
+          { key: "budget", label: "DUST Budget", icon: "◈" },
+          { key: "concurrency", label: "Concurrency", icon: "⫘" },
+        ].map(m => (
+          <button key={m.key} onClick={() => setMode(m.key)} style={{
+            flex: 1, padding: "12px 16px", border: "none", cursor: "pointer", fontSize: 13, fontWeight: 600,
+            background: mode === m.key ? "var(--accent-bg)" : "var(--card-bg)",
+            color: mode === m.key ? "var(--accent-text)" : "var(--muted)",
+            borderBottom: mode === m.key ? "2px solid var(--accent-border)" : "2px solid transparent",
+            transition: "all 0.2s",
+          }}>
+            {m.icon} {m.label}
+          </button>
+        ))}
       </div>
 
-      {/* ═══ HERO: Infinite Runway Target ═══ */}
-      <div style={{
-        padding: "24px 20px", borderRadius: 12, marginBottom: 28,
-        background: r.ratio >= 1 ? "var(--accent-bg)" : "var(--warn-bg)",
-        border: `2px solid ${r.ratio >= 1 ? "var(--accent-border)" : "var(--warn-border)"}`,
-        textAlign: "center",
-      }}>
-        <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "1.5px", color: "var(--muted)", marginBottom: 10 }}>
-          Infinite Runway Target
-        </div>
-        <div style={{ fontSize: 44, fontWeight: 800, fontFamily: "var(--mono)", color: "var(--text)", lineHeight: 1.1 }}>
-          {fi(r.recN)}
-          <span style={{ fontSize: 20, fontWeight: 600, color: "var(--accent-text)", marginLeft: 8 }}>NIGHT</span>
-        </div>
-        <div style={{ fontSize: 12, color: "var(--label)", marginTop: 10, lineHeight: 1.5 }}>
-          Hold this amount to generate DUST faster than you burn it — indefinitely.
-        </div>
-        <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 6 }}>
-          Burn: <strong style={{ color: "var(--text)" }}>{f(r.dBurn)}</strong> DUST/day
-          {" · "}Regen: <strong style={{ color: "var(--text)" }}>{f(r.dRegen)}</strong> DUST/day
-          {" · "}Surplus: <strong style={{ color: r.ratio >= 1 ? "var(--accent-text)" : "var(--warn-text)" }}>{r.ratio >= 1 ? "+" : ""}{f(r.dRegen - r.dBurn)}</strong>/day
-        </div>
-        <div style={{ fontSize: 10, color: "var(--muted)", marginTop: 8, borderTop: `1px solid ${r.ratio >= 1 ? "var(--accent-border)" : "var(--warn-border)"}`, paddingTop: 8 }}>
-          Equilibrium: {fi(r.eqNight)} NIGHT (exact break-even) · Shown: +{buf}% buffer
-        </div>
-      </div>
-
-      {/* 1: Profile */}
-      <section style={{ marginBottom: 28, paddingBottom: 24, borderBottom: "1px solid var(--section-border)" }}>
-        <h2 style={{ fontSize: 13, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--muted)", marginBottom: 14 }}>1 — Transaction Profile</h2>
-        <Pills options={Object.entries(PROFILES).map(([k, v]) => ({ value: k, label: v.label, badge: v.badge }))} value={pk} onChange={setPk} />
-        <p style={{ fontSize: 11, color: "var(--muted)", margin: "8px 0 0", fontStyle: "italic" }}>{p.desc}</p>
-
-        {pk === "custom" ? (
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px 16px", marginTop: 14 }}>
-            <div>
-              <Toggle label="Application circuit proof" value={cProof} onChange={setCProof} help="All TXs have a DUST spend proof (0.30). Smart contract calls add an app circuit proof (~0.67+ DUST)." />
-              <NumInput label="Ledger writes / TX" value={cWrites} onChange={setCWrites} min={0} max={50} step={1} help="On-chain state mutations. Adds ~0.004 DUST each." />
+      {/* ═══════════════════════════════════════════════════════ */}
+      {/* BUDGET MODE */}
+      {/* ═══════════════════════════════════════════════════════ */}
+      {mode === "budget" && (
+        <>
+          {/* Calibration banner */}
+          <div style={{ padding: "12px 16px", borderRadius: 8, marginBottom: 20, background: "var(--testnet-bg)", border: "1px solid var(--testnet-border)" }}>
+            <div style={{ fontSize: 12, fontWeight: 600, color: "var(--testnet-text)", marginBottom: 4 }}>Fee structure — 5 data points</div>
+            <div style={{ fontSize: 11, color: "var(--muted)", lineHeight: 1.6 }}>
+              <strong style={{ color: "var(--testnet-text)" }}>Two tiers:</strong> NIGHT transfers: <strong style={{ color: "var(--testnet-text)" }}>0.30 DUST</strong>. Contract calls: <strong style={{ color: "var(--testnet-text)" }}>~0.66-0.70 DUST</strong> (±3% regardless of circuit complexity).
+              <span style={{ cursor: "pointer", color: "var(--testnet-text)", textDecoration: "underline", fontSize: 10, marginLeft: 4 }} onClick={() => setShowCal(!showCal)}>{showCal ? "hide ▲" : "data ▼"}</span>
             </div>
-            <div>
-              <NumInput label="TXs per action" value={cTxPer} onChange={setCTxPer} step={1} help="On-chain TXs per user operation" />
-              <NumInput label="Actions / day" value={cActDay} onChange={setCActDay} step={10} help="Total daily user actions" />
+            {showCal && (
+              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11, fontFamily: "var(--mono)", marginTop: 8 }}>
+                <thead><tr style={{ borderBottom: "1px solid var(--border)" }}>
+                  {["Circuit", "k", "Writes", "Fee", "Model"].map(h => <th key={h} style={{ padding: "4px 8px", textAlign: "left", color: "var(--label)" }}>{h}</th>)}
+                </tr></thead>
+                <tbody>{CALIBRATION.map((c, i) => {
+                  const pred = c.writes === 0 && c.k === "—" ? FEE_NO_PROOF : estimateFee(true, c.writes);
+                  return <tr key={i} style={{ borderBottom: "1px solid var(--section-border)" }}>
+                    <td style={{ padding: "4px 8px", color: "var(--text)" }}>{c.circuit}</td>
+                    <td style={{ padding: "4px 8px", color: "var(--muted)" }}>{c.k}</td>
+                    <td style={{ padding: "4px 8px", color: "var(--muted)" }}>{c.writes}</td>
+                    <td style={{ padding: "4px 8px", color: "var(--accent-text)", fontWeight: 600 }}>{c.fee.toFixed(4)}</td>
+                    <td style={{ padding: "4px 8px", color: "var(--muted)" }}>{pred.toFixed(4)}</td>
+                  </tr>;
+                })}</tbody>
+              </table>
+            )}
+          </div>
+
+          {/* Hero */}
+          <div style={{
+            padding: "24px 20px", borderRadius: 12, marginBottom: 28, textAlign: "center",
+            background: r.ratio >= 1 ? "var(--accent-bg)" : "var(--warn-bg)",
+            border: `2px solid ${r.ratio >= 1 ? "var(--accent-border)" : "var(--warn-border)"}`,
+          }}>
+            <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "1.5px", color: "var(--muted)", marginBottom: 10 }}>Infinite Runway Target</div>
+            <div style={{ fontSize: 44, fontWeight: 800, fontFamily: "var(--mono)", color: "var(--text)", lineHeight: 1.1 }}>
+              {fi(r.recN)}<span style={{ fontSize: 20, fontWeight: 600, color: "var(--accent-text)", marginLeft: 8 }}>NIGHT</span>
+            </div>
+            <div style={{ fontSize: 12, color: "var(--label)", marginTop: 10 }}>Hold this amount to generate DUST faster than you burn it — indefinitely.</div>
+            <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 6 }}>
+              Burn: <strong style={{ color: "var(--text)" }}>{f(r.dBurn)}</strong> DUST/day · Regen: <strong style={{ color: "var(--text)" }}>{f(r.dRegen)}</strong> DUST/day · Surplus: <strong style={{ color: r.ratio >= 1 ? "var(--accent-text)" : "var(--warn-text)" }}>{r.ratio >= 1 ? "+" : ""}{f(r.dRegen - r.dBurn)}</strong>/day
+            </div>
+            <div style={{ fontSize: 10, color: "var(--muted)", marginTop: 8, borderTop: `1px solid ${r.ratio >= 1 ? "var(--accent-border)" : "var(--warn-border)"}`, paddingTop: 8 }}>
+              Equilibrium: {fi(r.eqNight)} NIGHT · +{buf}% buffer
             </div>
           </div>
-        ) : (
-          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 14 }}>
-            <Stat mini label="App circuit" value={hasProof ? "Yes" : "No"} sub={hasProof ? "~0.37 DUST added" : "DUST proof only (0.30)"} />
-            <Stat mini label="Writes" value={writes} sub={`+${f(FEE_PER_WRITE * writes)} DUST`} />
-            <Stat mini label="TXs / action" value={txPer} />
-            <Stat mini label="Actions / day" value={actDay} />
+
+          {/* Profile */}
+          <section style={{ marginBottom: 28, paddingBottom: 24, borderBottom: "1px solid var(--section-border)" }}>
+            <h2 style={{ fontSize: 13, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--muted)", marginBottom: 14 }}>Transaction Profile</h2>
+            <Pills options={Object.entries(PROFILES).map(([k, v]) => ({ value: k, label: v.label, badge: v.badge }))} value={pk} onChange={setPk} />
+            <p style={{ fontSize: 11, color: "var(--muted)", margin: "8px 0 0", fontStyle: "italic" }}>{p.desc}</p>
+            {pk === "custom" ? (
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px 16px", marginTop: 14 }}>
+                <div>
+                  <Toggle label="Application circuit proof" value={cProof} onChange={setCProof} help="Contract calls: ~0.67+ DUST. Transfers: 0.30 DUST." />
+                  <NumInput label="Ledger writes / TX" value={cWrites} onChange={setCWrites} min={0} max={50} step={1} help="~0.004 DUST each" />
+                </div>
+                <div>
+                  <NumInput label="TXs per action" value={cTxPer} onChange={setCTxPer} step={1} />
+                  <NumInput label="Actions / day" value={cActDay} onChange={setCActDay} step={10} />
+                </div>
+              </div>
+            ) : (
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 14 }}>
+                <Stat mini label="Fee/TX" value={`~${f(estimateFee(hasProof, writes))}`} sub="DUST" />
+                <Stat mini label="TXs/action" value={txPer} />
+                <Stat mini label="Actions/day" value={actDay} />
+                <Stat mini label="Daily TXs" value={fi(txPer * actDay)} />
+              </div>
+            )}
+          </section>
+
+          {/* Congestion */}
+          <section style={{ marginBottom: 28, paddingBottom: 24, borderBottom: "1px solid var(--section-border)" }}>
+            <h2 style={{ fontSize: 13, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--muted)", marginBottom: 10 }}>Network Conditions</h2>
+            <Pills options={Object.entries(CONGESTION).map(([k, v]) => ({ value: k, label: v.label }))} value={ck} onChange={setCk} />
+            <p style={{ fontSize: 11, color: "var(--muted)", margin: "6px 0 12px" }}>{cong.desc}</p>
+            <div style={{ maxWidth: 200 }}>
+              <NumInput label="Safety buffer" value={buf} onChange={setBuf} unit="%" min={0} max={200} step={5} />
+            </div>
+          </section>
+
+          {/* Sustainability */}
+          <section style={{ marginBottom: 28, paddingBottom: 24, borderBottom: "1px solid var(--section-border)" }}>
+            <h2 style={{ fontSize: 13, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--muted)", marginBottom: 14 }}>Sustainability</h2>
+            <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 12 }}>
+              <Stat mini label="Daily burn" value={`${f(r.dBurn)} DUST`} sub={`${fi(r.dailyTx)} TXs`} />
+              <Stat mini label="Weekly" value={`${f(r.wBurn)} DUST`} />
+              <Stat mini label="Regen/burn" value={`${r.ratio.toFixed(2)}×`} accent={r.ratio >= 1.5} warn={r.ratio < 1} sub={r.ratio >= 1.5 ? "Comfortable" : r.ratio >= 1 ? "Tight" : "Deficit"} />
+              <Stat mini label="Cap runway" value={r.runway >= 1 ? `${f(r.runway)}d` : `${f(r.runway * 24)}h`} sub="W/o regen" />
+            </div>
+          </section>
+        </>
+      )}
+
+      {/* ═══════════════════════════════════════════════════════ */}
+      {/* CONCURRENCY MODE */}
+      {/* ═══════════════════════════════════════════════════════ */}
+      {mode === "concurrency" && (
+        <>
+          {/* Chain limits banner */}
+          <div style={{ padding: "12px 16px", borderRadius: 8, marginBottom: 20, background: "var(--testnet-bg)", border: "1px solid var(--testnet-border)" }}>
+            <div style={{ fontSize: 12, fontWeight: 600, color: "var(--testnet-text)", marginBottom: 4 }}>UTXO Concurrency Model</div>
+            <div style={{ fontSize: 11, color: "var(--muted)", lineHeight: 1.6 }}>
+              Each NIGHT UTXO generates 1 DUST UTXO. DUST UTXOs lock during proving (~{LOCK_DURATION_SEC}s). More UTXOs = more concurrent TXs. Chain max: ~{MAX_TX_PER_BLOCK} TXs/block ({fi(MAX_TX_PER_MIN)} TXs/min). Split NIGHT UTXOs to increase concurrency.
+            </div>
           </div>
-        )}
 
-        <div style={{ marginTop: 12, padding: "8px 12px", borderRadius: 6, background: "var(--card-bg)", border: "1px solid var(--border)", fontFamily: "var(--mono)", fontSize: 13 }}>
-          <span style={{ color: "var(--muted)" }}>Est. fee/TX: </span>
-          <span style={{ color: "var(--accent-text)", fontWeight: 700 }}>~{f(r.feeFloor)} DUST</span>
-          <span style={{ color: "var(--muted)", fontSize: 11 }}> ({hasProof ? `${f(FEE_WITH_PROOF_BASE)} app circuit + ${f(FEE_PER_WRITE * writes)} writes` : "DUST spend proof only, no app circuit"})</span>
-        </div>
-      </section>
-
-      {/* 2: Congestion */}
-      <section style={{ marginBottom: 28, paddingBottom: 24, borderBottom: "1px solid var(--section-border)" }}>
-        <h2 style={{ fontSize: 13, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--muted)", marginBottom: 14 }}>2 — Network Conditions</h2>
-        <p style={{ fontSize: 11, color: "var(--muted)", margin: "0 0 10px", lineHeight: 1.5 }}>
-          Fees adjust dynamically based on <strong style={{ color: "var(--label)" }}>previous block fullness</strong>. Each block, prices shift ±4.6% toward the 50% utilization target. Floor = current preprod (near-empty blocks, best case). Plan for Target — that's where a healthy mainnet stabilizes.
-        </p>
-        <div style={{ marginBottom: 14 }}>
-          <Pills options={Object.entries(CONGESTION).map(([k, v]) => ({ value: k, label: v.label }))} value={ck} onChange={setCk} />
-          <p style={{ fontSize: 11, color: "var(--muted)", margin: "6px 0 0" }}>
-            {cong.desc}
-            {ck === "floor" && <span style={{ color: "var(--warn-text)" }}> — This is the cheapest fees will ever be. Not recommended for mainnet planning.</span>}
-          </p>
-        </div>
-        <div style={{ maxWidth: 200 }}>
-          <NumInput label="Safety buffer" value={buf} onChange={setBuf} unit="%" min={0} max={200} step={5} help="Headroom above minimum" />
-        </div>
-      </section>
-
-      {/* 3: Burn */}
-      <section style={{ marginBottom: 28, paddingBottom: 24, borderBottom: "1px solid var(--section-border)" }}>
-        <h2 style={{ fontSize: 13, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--muted)", marginBottom: 14 }}>3 — DUST Burn Rate</h2>
-        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 12 }}>
-          <Stat label="Fee / TX" value={`~${f(r.fee)} DUST`}
-            sub={r.congMult > 1 ? `${r.congMult.toFixed(1)}× floor` : "Floor pricing"}
-            warn={r.congMult > 2} />
-          <Stat label="Daily burn" value={`${f(r.dBurn)} DUST`} sub={`${fi(r.dailyTx)} TXs/day`} />
-        </div>
-        {r.congMult > 1 && (
-          <div style={{ fontSize: 11, color: "var(--warn-text)", marginBottom: 12, padding: "8px 12px", borderRadius: 6, background: "var(--warn-bg)", border: "1px solid var(--warn-border)" }}>
-            Congestion: ~{f(r.feeFloor)} → ~{f(r.fee)} DUST/TX ({r.congMult}× multiplier). Actual multiplier depends on duration and demand elasticity — these are conservative planning estimates.
+          {/* Hero: Concurrency */}
+          <div style={{
+            padding: "24px 20px", borderRadius: 12, marginBottom: 28, textAlign: "center",
+            background: c.chainLimited ? "var(--warn-bg)" : "var(--accent-bg)",
+            border: `2px solid ${c.chainLimited ? "var(--warn-border)" : "var(--accent-border)"}`,
+          }}>
+            <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "1.5px", color: "var(--muted)", marginBottom: 10 }}>
+              Infrastructure Required
+            </div>
+            <div style={{ display: "flex", justifyContent: "center", gap: 32, flexWrap: "wrap" }}>
+              <div>
+                <div style={{ fontSize: 40, fontWeight: 800, fontFamily: "var(--mono)", color: "var(--text)" }}>{fi(c.utxosNeeded)}</div>
+                <div style={{ fontSize: 12, color: "var(--accent-text)", fontWeight: 600 }}>DUST UTXOs</div>
+                <div style={{ fontSize: 10, color: "var(--muted)" }}>(= NIGHT UTXOs to split)</div>
+              </div>
+              <div>
+                <div style={{ fontSize: 40, fontWeight: 800, fontFamily: "var(--mono)", color: "var(--text)" }}>{fi(c.totalNight)}</div>
+                <div style={{ fontSize: 12, color: "var(--accent-text)", fontWeight: 600 }}>NIGHT</div>
+                <div style={{ fontSize: 10, color: "var(--muted)" }}>({fi(c.nightPerUtxo)}/UTXO × {fi(dustPerUtxo)} DUST cap)</div>
+              </div>
+              <div>
+                <div style={{ fontSize: 40, fontWeight: 800, fontFamily: "var(--mono)", color: "var(--text)" }}>{c.proofServersNeeded}</div>
+                <div style={{ fontSize: 12, color: "var(--accent-text)", fontWeight: 600 }}>Proof Servers</div>
+                <div style={{ fontSize: 10, color: "var(--muted)" }}>({PROOFS_PER_HOUR_PER_SERVER} proofs/hr each)</div>
+              </div>
+            </div>
+            <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 14, borderTop: `1px solid ${c.chainLimited ? "var(--warn-border)" : "var(--accent-border)"}`, paddingTop: 8 }}>
+              Throughput: <strong style={{ color: "var(--text)" }}>{f(c.effectiveTxPerMin)}</strong> TXs/min · Bottleneck: <strong style={{ color: c.chainLimited ? "var(--warn-text)" : "var(--accent-text)" }}>{c.bottleneck}</strong>
+              {c.chainLimited && <span style={{ color: "var(--warn-text)" }}> — Chain saturated, more UTXOs won't help</span>}
+            </div>
           </div>
-        )}
-        <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-          <Stat mini label="Weekly" value={`${f(r.wBurn)} DUST`} />
-          <Stat mini label="Monthly" value={`${f(r.mBurn)} DUST`} />
-        </div>
-      </section>
 
-      {/* 4: NIGHT Detail */}
-      <section style={{ marginBottom: 28, paddingBottom: 24, borderBottom: "1px solid var(--section-border)" }}>
-        <h2 style={{ fontSize: 13, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--muted)", marginBottom: 14 }}>4 — Sustainability Breakdown</h2>
-        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 12 }}>
-          <Stat mini label="Equilibrium" value={fi(r.eqNight)} sub="Exact break-even" />
-          <Stat mini label={`+${buf}% buffer`} value={fi(r.recN)} sub="Recommended" accent />
-          <Stat mini label="Regen / burn"
-            value={`${r.ratio.toFixed(2)}×`}
-            sub={r.ratio >= 1.5 ? "Comfortable" : r.ratio >= 1 ? "Tight" : "Deficit"}
-            accent={r.ratio >= 1.5} warn={r.ratio < 1} />
-          <Stat mini label="Cap runway"
-            value={r.runway >= 1 ? `${f(r.runway)} days` : `${f(r.runway * 24)} hrs`}
-            sub="Without regen" />
-        </div>
-        <div style={{
-          padding: "12px 16px", borderRadius: 8, fontSize: 12, lineHeight: 1.6, color: "var(--label)",
-          background: r.ratio >= 1.5 ? "var(--accent-bg)" : r.ratio >= 1 ? "var(--card-bg)" : "var(--warn-bg)",
-          border: `1px solid ${r.ratio >= 1.5 ? "var(--accent-border)" : r.ratio >= 1 ? "var(--border)" : "var(--warn-border)"}`,
-        }}>
-          <div style={{ fontWeight: 600, marginBottom: 6, color: "var(--text)", fontSize: 13 }}>
-            {r.ratio >= 1.5 ? "Comfortably self-sustaining" : r.ratio >= 1 ? "Self-sustaining (thin margin)" : "Burns faster than regen — increase NIGHT"}
-          </div>
-          <div><strong>Generation:</strong> 1 NIGHT → {DUST_PER_NIGHT} DUST / ~7d ({DUST_PER_NIGHT_PER_DAY.toFixed(4)} DUST/NIGHT/day)</div>
-          <div><strong>Daily regen:</strong> {f(r.dRegen)} DUST from {fi(r.recN)} NIGHT</div>
-          <div><strong>Daily burn:</strong> {f(r.dBurn)} DUST ({fi(r.dailyTx)} TXs × ~{f(r.fee)} DUST)</div>
-          <div><strong>Net:</strong> {r.ratio >= 1 ? "+" : ""}{f(r.dRegen - r.dBurn)} DUST/day {r.ratio >= 1 ? "(surplus)" : "(deficit)"}</div>
-        </div>
-      </section>
+          {/* Inputs */}
+          <section style={{ marginBottom: 28, paddingBottom: 24, borderBottom: "1px solid var(--section-border)" }}>
+            <h2 style={{ fontSize: 13, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--muted)", marginBottom: 14 }}>Workload</h2>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px 16px" }}>
+              <NumInput label="Concurrent users" value={concUsers} onChange={setConcUsers} min={1} step={1} help="Users submitting TXs simultaneously" />
+              <NumInput label="TXs per user burst" value={txPerUserBurst} onChange={setTxPerUserBurst} min={1} step={1} help="TXs each user sends before waiting" />
+              <NumInput label="Burst interval" value={burstIntervalSec} onChange={setBurstIntervalSec} unit="sec" min={1} step={1} help="Time between each user's TX submissions" />
+              <NumInput label="DUST per UTXO" value={dustPerUtxo} onChange={setDustPerUtxo} min={100} step={1000} help="DUST balance in each UTXO (~10K+ typical)" />
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px 16px", marginTop: 8 }}>
+              <Toggle label="Application circuit proof" value={hasProofConc} onChange={setHasProofConc} help="Contract calls vs simple transfers" />
+              <NumInput label="Ledger writes / TX" value={writesConc} onChange={setWritesConc} min={0} max={50} step={1} />
+            </div>
+          </section>
 
-      {/* Planning */}
-      <section style={{ marginBottom: 28, paddingBottom: 24, borderBottom: "1px solid var(--section-border)" }}>
-        <h2 style={{ fontSize: 13, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--muted)", marginBottom: 14 }}>Planning Notes</h2>
-        <div style={{ padding: "14px 16px", borderRadius: 8, background: "var(--card-bg)", border: "1px solid var(--border)", fontSize: 12, lineHeight: 1.7, color: "var(--label)" }}>
-          <div style={{ marginBottom: 8 }}><strong style={{ color: "var(--text)" }}>All TXs require a ZK proof.</strong> DUST is shielded, so even a simple NIGHT transfer needs a DUST spend proof (0.30 DUST). Contract calls add an application circuit proof on top, bringing the fee to ~0.66-0.70 DUST. The app circuit proof is the cost — circuit complexity (k-value) barely matters.</div>
-          <div style={{ marginBottom: 8 }}><strong style={{ color: "var(--text)" }}>Prices adjust every block based on previous block fullness.</strong> Below 50% → prices decrease. Above 50% → prices increase. ±4.6% per block (every 6s). At 75% sustained utilization, fees roughly 12× floor within 10 minutes. At 90%, fees double every ~96 seconds. Prices cool equally fast when demand drops.</div>
-          <div style={{ marginBottom: 8 }}><strong style={{ color: "var(--text)" }}>Floor fees are the best case.</strong> All confirmed data is from near-empty preprod blocks where prices have been declining to the MIN_COST floor. On a healthy mainnet at ~50% utilization, prices stabilize but won't decrease. Plan for Target, not Floor.</div>
-          <div style={{ marginBottom: 8 }}><strong style={{ color: "var(--text)" }}>Writes add marginally.</strong> Each ledger write adds ~0.004 DUST. Going from 3 to 13 writes only adds ~0.04 DUST (~6% of total). Optimize TX count, not writes per TX.</div>
-          <div style={{ marginBottom: 8 }}><strong style={{ color: "var(--text)" }}>DUST cap provides meaningful buffer.</strong> At ~0.69 DUST/TX for contract calls, your 5 DUST/NIGHT cap gives days of runway. Regen still essential for sustained operations.</div>
-          <div style={{ marginBottom: 8 }}><strong style={{ color: "var(--text)" }}>Proving time is the throughput cap.</strong> ~22s/proof regardless of k (7-12). ~160 proofs/hr per server. Scale horizontally.</div>
-          <div><strong style={{ color: "var(--text)" }}>For exact fees:</strong> use <code style={{ fontSize: 10, background: "var(--input-bg)", padding: "1px 4px", borderRadius: 3 }}>Transaction.mockProve().fees(params)</code> from <code style={{ fontSize: 10, background: "var(--input-bg)", padding: "1px 4px", borderRadius: 3 }}>@midnight/ledger</code>.</div>
-        </div>
-      </section>
+          {/* Throughput Analysis */}
+          <section style={{ marginBottom: 28, paddingBottom: 24, borderBottom: "1px solid var(--section-border)" }}>
+            <h2 style={{ fontSize: 13, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--muted)", marginBottom: 14 }}>Throughput Analysis</h2>
+            <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 12 }}>
+              <Stat mini label="UTXOs/user" value={c.utxosPerUser} sub={`${LOCK_DURATION_SEC}s lock ÷ ${burstIntervalSec}s interval`} />
+              <Stat mini label="Your capacity" value={`${f(c.maxTxPerMin)}/min`} sub={c.chainLimited ? "Exceeds chain limit" : "UTXO-limited"} warn={c.chainLimited} />
+              <Stat mini label="Chain max" value={`${fi(MAX_TX_PER_MIN)}/min`} sub={`${MAX_TX_PER_BLOCK} TXs × ${BLOCKS_PER_MIN} blk/min`} />
+              <Stat mini label="Fee/TX" value={`${f(c.feePerTx)} DUST`} />
+            </div>
 
-      {/* Params */}
+            {/* UTXO runway */}
+            <div style={{ padding: "10px 14px", borderRadius: 8, background: "var(--card-bg)", border: "1px solid var(--border)", marginBottom: 12 }}>
+              <div style={{ fontSize: 11, fontWeight: 600, color: "var(--label)", marginBottom: 4 }}>Per-UTXO Capacity</div>
+              <div style={{ fontSize: 12, color: "var(--muted)", lineHeight: 1.6 }}>
+                Each UTXO holds <strong style={{ color: "var(--text)" }}>{fi(dustPerUtxo)} DUST</strong> → <strong style={{ color: "var(--text)" }}>{fi(c.txPerUtxoBeforeDry)}</strong> TXs before depletion →
+                at max throughput, <strong style={{ color: "var(--text)" }}>{f(c.utxoRunwayMin)} min</strong> before needing regen.
+                Regen rate: {DUST_PER_NIGHT_PER_DAY.toFixed(4)} DUST/NIGHT/day.
+              </div>
+            </div>
+
+            {/* Sustainability check */}
+            <div style={{
+              padding: "10px 14px", borderRadius: 8, fontSize: 12, lineHeight: 1.6, color: "var(--label)",
+              background: c.sustainable ? "var(--accent-bg)" : "var(--warn-bg)",
+              border: `1px solid ${c.sustainable ? "var(--accent-border)" : "var(--warn-border)"}`,
+            }}>
+              <div style={{ fontWeight: 600, marginBottom: 4, color: "var(--text)" }}>
+                {c.sustainable ? "✓ Sustainable at full throughput" : "⚠ Burns faster than regen at full throughput"}
+              </div>
+              <div>Daily burn at capacity: <strong>{f(c.dailyBurn)}</strong> DUST · Daily regen: <strong>{f(c.dailyRegen)}</strong> DUST</div>
+              {!c.sustainable && <div style={{ color: "var(--warn-text)", marginTop: 4 }}>Increase NIGHT holdings or reduce throughput. DUST UTXOs will deplete over time.</div>}
+            </div>
+          </section>
+
+          {/* Scaling reference */}
+          <section style={{ marginBottom: 28, paddingBottom: 24, borderBottom: "1px solid var(--section-border)" }}>
+            <h2 style={{ fontSize: 13, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--muted)", marginBottom: 14 }}>Scaling Reference</h2>
+            <div style={{ overflowX: "auto" }}>
+              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11, fontFamily: "var(--mono)" }}>
+                <thead><tr style={{ borderBottom: "1px solid var(--border)" }}>
+                  {["UTXOs", "Concurrent", "TXs/min", "TXs/hr", "NIGHT", "Proof Servers", "Status"].map(h =>
+                    <th key={h} style={{ padding: "6px 8px", textAlign: "left", color: "var(--label)", fontWeight: 600 }}>{h}</th>)}
+                </tr></thead>
+                <tbody>
+                  {[1, 5, 10, 25, 50, 100, c.utxosToSaturate].map(n => {
+                    const txMin = Math.min(n * (60 / LOCK_DURATION_SEC), MAX_TX_PER_MIN);
+                    const sat = txMin >= MAX_TX_PER_MIN;
+                    const night = n * c.nightPerUtxo;
+                    const servers = Math.max(Math.ceil(txMin * 60 / PROOFS_PER_HOUR_PER_SERVER), 1);
+                    return <tr key={n} style={{ borderBottom: "1px solid var(--section-border)", background: n === c.utxosNeeded ? "var(--accent-bg)" : undefined }}>
+                      <td style={{ padding: "5px 8px", color: "var(--text)" }}>{n}</td>
+                      <td style={{ padding: "5px 8px", color: "var(--muted)" }}>{n}</td>
+                      <td style={{ padding: "5px 8px", color: "var(--text)" }}>{f(txMin)}</td>
+                      <td style={{ padding: "5px 8px", color: "var(--muted)" }}>{fi(txMin * 60)}</td>
+                      <td style={{ padding: "5px 8px", color: "var(--text)" }}>{fi(night)}</td>
+                      <td style={{ padding: "5px 8px", color: "var(--muted)" }}>{servers}</td>
+                      <td style={{ padding: "5px 8px", color: sat ? "var(--warn-text)" : "var(--accent-text)" }}>{sat ? "Chain max" : "OK"}</td>
+                    </tr>;
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </section>
+
+          {/* Planning Notes */}
+          <section style={{ marginBottom: 28, paddingBottom: 24, borderBottom: "1px solid var(--section-border)" }}>
+            <h2 style={{ fontSize: 13, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--muted)", marginBottom: 14 }}>Concurrency Notes</h2>
+            <div style={{ padding: "14px 16px", borderRadius: 8, background: "var(--card-bg)", border: "1px solid var(--border)", fontSize: 12, lineHeight: 1.7, color: "var(--label)" }}>
+              <div style={{ marginBottom: 8 }}><strong style={{ color: "var(--text)" }}>1 NIGHT UTXO = 1 DUST UTXO.</strong> Split your NIGHT holdings into N separate UTXOs to get N concurrent transaction slots. Each DUST UTXO locks for ~{LOCK_DURATION_SEC}s during proving + submission.</div>
+              <div style={{ marginBottom: 8 }}><strong style={{ color: "var(--text)" }}>Spending creates change.</strong> When a DUST UTXO pays a fee, it's nullified and a new UTXO is created with the remaining balance. The new UTXO isn't available until the TX is accepted on-chain.</div>
+              <div style={{ marginBottom: 8 }}><strong style={{ color: "var(--text)" }}>Proof servers handle ~2-3 wallets.</strong> Beyond that, performance degrades. Scale proof servers horizontally — each handles ~{PROOFS_PER_HOUR_PER_SERVER} proofs/hr.</div>
+              <div style={{ marginBottom: 8 }}><strong style={{ color: "var(--text)" }}>Block size is the hard ceiling.</strong> At ~{fi(AVG_TX_SIZE)}B per TX and {fi(BLOCK_SIZE_LIMIT)}B per block, the chain caps at ~{MAX_TX_PER_BLOCK} TXs/block ({fi(MAX_TX_PER_MIN)} TXs/min). ~{c.utxosToSaturate} UTXOs saturates the chain.</div>
+              <div><strong style={{ color: "var(--text)" }}>DUST regenerates linearly.</strong> Same rate as initial generation. After spending, the UTXO refills at {DUST_PER_NIGHT_PER_DAY.toFixed(4)} DUST/NIGHT/day toward its cap.</div>
+            </div>
+          </section>
+        </>
+      )}
+
+      {/* Protocol Params (both modes) */}
       <section style={{ padding: "14px 16px", borderRadius: 8, background: "var(--card-bg)", border: "1px solid var(--border)", fontSize: 11, color: "var(--muted)", lineHeight: 1.6 }}>
         <div style={{ fontWeight: 600, marginBottom: 6, color: "var(--label)", fontSize: 12 }}>Protocol Parameters</div>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "2px 24px", fontFamily: "var(--mono)", fontSize: 11 }}>
-          <div>block_time: {BLOCK_TIME_SEC}s</div>
+          <div>block_time: {BLOCK_TIME_SEC}s ({BLOCKS_PER_MIN} blk/min)</div>
           <div>dust/night: {DUST_PER_NIGHT} / ~7d</div>
-          <div>fee_dust_proof_only: 0.30 DUST</div>
-          <div>fee_with_app_circuit: ~0.67-0.70 DUST</div>
-          <div>marginal/write: ~0.0041 DUST</div>
-          <div>price_adjust: ±4.6%/blk</div>
+          <div>block_size: {fi(BLOCK_SIZE_LIMIT)}B</div>
+          <div>avg_tx_size: {fi(AVG_TX_SIZE)}B</div>
+          <div>proving_time: ~{PROVING_TIME_SEC}s</div>
+          <div>lock_duration: ~{LOCK_DURATION_SEC}s</div>
+          <div>fee_transfer: 0.30 DUST</div>
+          <div>fee_contract: ~0.67-0.70 DUST</div>
         </div>
       </section>
 
       <div style={{ textAlign: "center", fontSize: 10, color: "var(--muted)", marginTop: 20, paddingTop: 16, borderTop: "1px solid var(--section-border)" }}>
-        NIGHT Estimator v0.9 — Infinite Runway model. 5-point calibration. Fee ≈ ~0.68 DUST (app circuit) or 0.30 (DUST proof only).
+        NIGHT Estimator v1.0 — DUST Budget + Concurrency Planning. 5-point fee calibration. UTXO lock model.
       </div>
     </div>
   );
