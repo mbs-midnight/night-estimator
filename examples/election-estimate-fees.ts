@@ -191,11 +191,11 @@ async function main() {
 
   // ─── Fee Estimates ───
   // Model calibrated from preprod explorer (poker circuits k=7-12):
-  //   Fees are ~66-70 DUST regardless of k or writes
-  //   Base ~67 DUST + ~0.41/write
+  //   Fees are ~0.66-0.70 DUST regardless of k or writes
+  //   Base ~0.67 DUST + ~0.0041/write
   // Election circuits at k=13-15 are larger — conservative 3%/k-level above 12
   const estimateFee = (k: number, writes: number): number => {
-    const base = 67.0 + 0.41 * writes;
+    const base = 0.67 + 0.0041 * writes;
     const kAdj = k > 12 ? 1 + 0.03 * (k - 12) : 1;
     return base * kAdj;
   };
@@ -213,7 +213,7 @@ async function main() {
   }
   console.log("  └─────────────────┴──────┴────────┴───────────┴──────────────────────────┘");
   console.log();
-  console.log("  * Calibrated from poker circuits (k=7-12): ~66-70 DUST flat");
+  console.log("  * Calibrated from poker circuits (k=7-12): ~0.66-0.70 DUST flat");
   console.log("  * k=13-15 adjustment: +3% per k-level above 12 (conservative)");
   console.log("  * For exact fees: deploy to preprod or use Transaction.mockProve().fees()");
 

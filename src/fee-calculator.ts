@@ -170,9 +170,9 @@ async function main() {
   
   const scenarios = [
     { name: 'NIGHT transfer (DUST proof only)', dustEstimate: 0.30 },
-    { name: 'Light contract (k=7, 3 writes)', dustEstimate: 66.31 },
-    { name: 'Medium contract (k=10, 6 writes)', dustEstimate: 69.00 },
-    { name: 'Heavy contract (k=10, 13 writes)', dustEstimate: 70.42 },
+    { name: 'Light contract (k=7, 3 writes)', dustEstimate: 0.6631 },
+    { name: 'Medium contract (k=10, 6 writes)', dustEstimate: 0.69 },
+    { name: 'Heavy contract (k=10, 13 writes)', dustEstimate: 0.7042 },
   ];
 
   console.log('  Transaction Type                    | Est. Fee (DUST)');
@@ -190,7 +190,7 @@ async function main() {
   const dustPerNightPerDay = dustPerNight / timeToCapDays;
   
   const txPerDay = 400;
-  const dustPerTx = 69; // Medium contract
+  const dustPerTx = 0.69; // Medium contract
   const dailyBurn = txPerDay * dustPerTx;
   const minNight = Math.ceil(dailyBurn / dustPerNightPerDay);
   

@@ -13,37 +13,37 @@ const SENSITIVITY_A = 100;
 // ─── FEE MODEL (calibrated from 5 preprod data points) ───
 //
 // Observed fees (Midnight preprod explorer, Dominion Poker):
-//   commit_action_state  k=7   3 writes   66.31 DUST
-//   post_small_blind     k=11  5 writes   68.63 DUST
-//   post_big_blind       k=10  6 writes   ~69   DUST
-//   commit_deck_cards    k=10  13 writes  70.42 DUST
+//   commit_action_state  k=7   3 writes   0.6631 DUST
+//   post_small_blind     k=11  5 writes   0.6863 DUST
+//   post_big_blind       k=10  6 writes   ~0.69  DUST
+//   commit_deck_cards    k=10  13 writes  0.7042 DUST
 //   NIGHT transfer       —     0 writes   0.30  DUST
 //
-// Key finding: fees are nearly flat (~66-70 DUST, ±3%) across all contract
+// Key finding: fees are nearly flat (~0.66-0.70 DUST, ±3%) across all contract
 // circuits regardless of k-value (7-12) or write count (3-13).
 // Fee is dominated by a large constant (proof verification + TX base cost).
 // k and writes contribute only marginally.
 //
 // Two-tier model:
 //   - No app circuit (NIGHT transfer, DUST proof only): 0.30 DUST
-//   - With app circuit (contract call, DUST proof + app proof): ~68 DUST
+//   - With app circuit (contract call, DUST proof + app proof): ~0.68 DUST
 //
 // Marginal effects (small but observable):
-//   - Per write: ~0.4 DUST (from 66.31@3writes to 70.42@13writes ≈ 0.41/write)
+//   - Per write: ~0.004 DUST (from 0.6631@3writes to 0.7042@13writes ≈ 0.0041/write)
 //   - Per k-level: negligible (dominated by constant)
 
 const FEE_NO_PROOF = 0.30;          // NIGHT transfer — confirmed
-const FEE_WITH_PROOF_BASE = 67.0;   // Base cost for any TX with app proof
-const FEE_PER_WRITE = 0.41;         // Marginal cost per ledger write (derived from data)
-const FEE_WITH_PROOF_AVG = 68.5;    // Simple average for quick estimates
+const FEE_WITH_PROOF_BASE = 0.67;   // Base cost for any TX with app proof
+const FEE_PER_WRITE = 0.0041;         // Marginal cost per ledger write (derived from data)
+const FEE_WITH_PROOF_AVG = 0.685;    // Simple average for quick estimates
 
 // Observed data for calibration display
 const CALIBRATION = [
   { circuit: "NIGHT transfer", k: "—", writes: 0, fee: 0.30, confirmed: true },
-  { circuit: "commit_action_state", k: 7, writes: 3, fee: 66.31, confirmed: true },
-  { circuit: "post_small_blind", k: 11, writes: 5, fee: 68.63, confirmed: true },
-  { circuit: "post_big_blind", k: 10, writes: 6, fee: 69.00, confirmed: true },
-  { circuit: "commit_deck_cards", k: 10, writes: 13, fee: 70.42, confirmed: true },
+  { circuit: "commit_action_state", k: 7, writes: 3, fee: 0.6631, confirmed: true },
+  { circuit: "post_small_blind", k: 11, writes: 5, fee: 0.6863, confirmed: true },
+  { circuit: "post_big_blind", k: 10, writes: 6, fee: 0.69, confirmed: true },
+  { circuit: "commit_deck_cards", k: 10, writes: 13, fee: 0.7042, confirmed: true },
 ];
 
 function estimateFee(hasAppProof, writes = 5) {
@@ -83,22 +83,22 @@ const PROFILES = {
   },
   pokerTable: {
     label: "Poker (2P)",
-    desc: "Dominion Poker: ~15.7 TXs/game, ~4.8 games/hr, running 24/7. Fee ~66-70 DUST/TX.",
+    desc: "Dominion Poker: ~15.7 TXs/game, ~4.8 games/hr, running 24/7. Fee ~0.66-0.70 DUST/TX.",
     hasProof: true, writes: 6, txPerAction: 15.7, actionsPerDay: 115, badge: "✓",
   },
   lightContract: {
     label: "Light Contract",
-    desc: "Simple DApp — small circuit, few writes. ~67 DUST/TX. Example: 200 user actions/day, 1 TX each.",
+    desc: "Simple DApp — small circuit, few writes. ~0.67 DUST/TX. Example: 200 user actions/day, 1 TX each.",
     hasProof: true, writes: 2, txPerAction: 1, actionsPerDay: 200,
   },
   mediumContract: {
     label: "Medium Contract",
-    desc: "DEX/lending — moderate writes. ~69 DUST/TX. Example: 200 user actions/day, 3 TXs each.",
+    desc: "DEX/lending — moderate writes. ~0.69 DUST/TX. Example: 200 user actions/day, 3 TXs each.",
     hasProof: true, writes: 6, txPerAction: 3, actionsPerDay: 200,
   },
   heavyContract: {
     label: "Heavy Contract",
-    desc: "Complex multi-step operations — many writes. ~73 DUST/TX. Example: 200 user actions/day, 8 TXs each.",
+    desc: "Complex multi-step operations — many writes. ~0.73 DUST/TX. Example: 200 user actions/day, 8 TXs each.",
     hasProof: true, writes: 15, txPerAction: 8, actionsPerDay: 200,
   },
 };
@@ -256,7 +256,7 @@ export default function DustBudgetCalculator() {
         <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6 }}>
           <div style={{ width: 32, height: 32, borderRadius: "50%", border: "2px solid var(--accent-border)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 14 }}>◑</div>
           <h1 style={{ fontSize: 22, fontWeight: 700, margin: 0, letterSpacing: "-0.02em" }}>NIGHT Estimator</h1>
-          <span style={{ fontSize: 10, fontWeight: 600, background: "var(--accent-border)", color: "#fff", padding: "2px 8px", borderRadius: 10 }}>v0.8</span>
+          <span style={{ fontSize: 10, fontWeight: 600, background: "var(--accent-border)", color: "#fff", padding: "2px 8px", borderRadius: 10 }}>v0.9</span>
         </div>
         <p style={{ fontSize: 13, color: "var(--muted)", margin: 0, lineHeight: 1.5 }}>
           Estimate NIGHT holdings to sustain DApp operations on Midnight.
@@ -269,7 +269,7 @@ export default function DustBudgetCalculator() {
           Fee structure — confirmed from 5 preprod data points
         </div>
         <div style={{ fontSize: 11, color: "var(--muted)", lineHeight: 1.6 }}>
-          <strong style={{ color: "var(--testnet-text)" }}>Two tiers:</strong> NIGHT transfers cost <strong style={{ color: "var(--testnet-text)" }}>0.30 DUST</strong> (DUST spend proof only, no app circuit). Contract calls cost <strong style={{ color: "var(--testnet-text)" }}>~66-70 DUST</strong> (DUST proof + application circuit proof) regardless of circuit complexity (k=7 to k=12, 3 to 13 writes — only ±3% variation). The app circuit proof dominates; writes add ~0.4 DUST each.
+          <strong style={{ color: "var(--testnet-text)" }}>Two tiers:</strong> NIGHT transfers cost <strong style={{ color: "var(--testnet-text)" }}>0.30 DUST</strong> (DUST spend proof only, no app circuit). Contract calls cost <strong style={{ color: "var(--testnet-text)" }}>~0.66-0.70 DUST</strong> (DUST proof + application circuit proof) regardless of circuit complexity (k=7 to k=12, 3 to 13 writes — only ±3% variation). The app circuit proof dominates; writes add ~0.004 DUST each.
           <span style={{ display: "inline-block", marginLeft: 4, cursor: "pointer", color: "var(--testnet-text)", textDecoration: "underline", fontSize: 10 }} onClick={() => setShowCal(!showCal)}>
             {showCal ? "hide data ▲" : "show data ▼"}
           </span>
@@ -342,8 +342,8 @@ export default function DustBudgetCalculator() {
         {pk === "custom" ? (
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px 16px", marginTop: 14 }}>
             <div>
-              <Toggle label="Application circuit proof" value={cProof} onChange={setCProof} help="All TXs have a DUST spend proof (0.30). Smart contract calls add an app circuit proof (~67+ DUST)." />
-              <NumInput label="Ledger writes / TX" value={cWrites} onChange={setCWrites} min={0} max={50} step={1} help="On-chain state mutations. Adds ~0.4 DUST each." />
+              <Toggle label="Application circuit proof" value={cProof} onChange={setCProof} help="All TXs have a DUST spend proof (0.30). Smart contract calls add an app circuit proof (~0.67+ DUST)." />
+              <NumInput label="Ledger writes / TX" value={cWrites} onChange={setCWrites} min={0} max={50} step={1} help="On-chain state mutations. Adds ~0.004 DUST each." />
             </div>
             <div>
               <NumInput label="TXs per action" value={cTxPer} onChange={setCTxPer} step={1} help="On-chain TXs per user operation" />
@@ -352,7 +352,7 @@ export default function DustBudgetCalculator() {
           </div>
         ) : (
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 14 }}>
-            <Stat mini label="App circuit" value={hasProof ? "Yes" : "No"} sub={hasProof ? "~67+ DUST added" : "DUST proof only (0.30)"} />
+            <Stat mini label="App circuit" value={hasProof ? "Yes" : "No"} sub={hasProof ? "~0.37 DUST added" : "DUST proof only (0.30)"} />
             <Stat mini label="Writes" value={writes} sub={`+${f(FEE_PER_WRITE * writes)} DUST`} />
             <Stat mini label="TXs / action" value={txPer} />
             <Stat mini label="Actions / day" value={actDay} />
@@ -437,11 +437,11 @@ export default function DustBudgetCalculator() {
       <section style={{ marginBottom: 28, paddingBottom: 24, borderBottom: "1px solid var(--section-border)" }}>
         <h2 style={{ fontSize: 13, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--muted)", marginBottom: 14 }}>Planning Notes</h2>
         <div style={{ padding: "14px 16px", borderRadius: 8, background: "var(--card-bg)", border: "1px solid var(--border)", fontSize: 12, lineHeight: 1.7, color: "var(--label)" }}>
-          <div style={{ marginBottom: 8 }}><strong style={{ color: "var(--text)" }}>All TXs require a ZK proof.</strong> DUST is shielded, so even a simple NIGHT transfer needs a DUST spend proof (0.30 DUST). Contract calls add an application circuit proof on top, bringing the fee to ~66-70 DUST. The app circuit proof is the cost — circuit complexity (k-value) barely matters.</div>
+          <div style={{ marginBottom: 8 }}><strong style={{ color: "var(--text)" }}>All TXs require a ZK proof.</strong> DUST is shielded, so even a simple NIGHT transfer needs a DUST spend proof (0.30 DUST). Contract calls add an application circuit proof on top, bringing the fee to ~0.66-0.70 DUST. The app circuit proof is the cost — circuit complexity (k-value) barely matters.</div>
           <div style={{ marginBottom: 8 }}><strong style={{ color: "var(--text)" }}>Prices adjust every block based on previous block fullness.</strong> Below 50% → prices decrease. Above 50% → prices increase. ±4.6% per block (every 6s). At 75% sustained utilization, fees roughly 12× floor within 10 minutes. At 90%, fees double every ~96 seconds. Prices cool equally fast when demand drops.</div>
           <div style={{ marginBottom: 8 }}><strong style={{ color: "var(--text)" }}>Floor fees are the best case.</strong> All confirmed data is from near-empty preprod blocks where prices have been declining to the MIN_COST floor. On a healthy mainnet at ~50% utilization, prices stabilize but won't decrease. Plan for Target, not Floor.</div>
-          <div style={{ marginBottom: 8 }}><strong style={{ color: "var(--text)" }}>Writes add marginally.</strong> Each ledger write adds ~0.4 DUST. Going from 3 to 13 writes only adds ~4 DUST (~6% of total). Optimize TX count, not writes per TX.</div>
-          <div style={{ marginBottom: 8 }}><strong style={{ color: "var(--text)" }}>Cap runway is hours, not days.</strong> At ~69 DUST/TX for contract calls, your DUST cap depletes fast. Continuous regen from NIGHT is essential — any interruption (redesignation, transfer) risks outage.</div>
+          <div style={{ marginBottom: 8 }}><strong style={{ color: "var(--text)" }}>Writes add marginally.</strong> Each ledger write adds ~0.004 DUST. Going from 3 to 13 writes only adds ~0.04 DUST (~6% of total). Optimize TX count, not writes per TX.</div>
+          <div style={{ marginBottom: 8 }}><strong style={{ color: "var(--text)" }}>DUST cap provides meaningful buffer.</strong> At ~0.69 DUST/TX for contract calls, your 5 DUST/NIGHT cap gives days of runway. Regen still essential for sustained operations.</div>
           <div style={{ marginBottom: 8 }}><strong style={{ color: "var(--text)" }}>Proving time is the throughput cap.</strong> ~22s/proof regardless of k (7-12). ~160 proofs/hr per server. Scale horizontally.</div>
           <div><strong style={{ color: "var(--text)" }}>For exact fees:</strong> use <code style={{ fontSize: 10, background: "var(--input-bg)", padding: "1px 4px", borderRadius: 3 }}>Transaction.mockProve().fees(params)</code> from <code style={{ fontSize: 10, background: "var(--input-bg)", padding: "1px 4px", borderRadius: 3 }}>@midnight/ledger</code>.</div>
         </div>
@@ -454,14 +454,14 @@ export default function DustBudgetCalculator() {
           <div>block_time: {BLOCK_TIME_SEC}s</div>
           <div>dust/night: {DUST_PER_NIGHT} / ~7d</div>
           <div>fee_dust_proof_only: 0.30 DUST</div>
-          <div>fee_with_app_circuit: ~67-70 DUST</div>
-          <div>marginal/write: ~0.41 DUST</div>
+          <div>fee_with_app_circuit: ~0.67-0.70 DUST</div>
+          <div>marginal/write: ~0.0041 DUST</div>
           <div>price_adjust: ±4.6%/blk</div>
         </div>
       </section>
 
       <div style={{ textAlign: "center", fontSize: 10, color: "var(--muted)", marginTop: 20, paddingTop: 16, borderTop: "1px solid var(--section-border)" }}>
-        NIGHT Estimator v0.8 — Infinite Runway model. 5-point calibration. Fee ≈ ~68 DUST (app circuit) or 0.30 (DUST proof only).
+        NIGHT Estimator v0.9 — Infinite Runway model. 5-point calibration. Fee ≈ ~0.68 DUST (app circuit) or 0.30 (DUST proof only).
       </div>
     </div>
   );
