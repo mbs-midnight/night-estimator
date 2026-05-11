@@ -7,7 +7,7 @@ The NIGHT Estimator is a planning tool for DApp operators on the Midnight networ
 1. **How much NIGHT do I need to hold** to run my application indefinitely?
 2. **How much infrastructure do I need** to support my expected concurrent users?
 
-The tool runs as a web application and is available at the deployed Vercel URL and in the [GitHub repo](https://github.com/mbs-midnight/night-estimator).
+The tool runs as a web application and is available at the deployed [Vercel URL](https://night-estimator.vercel.app) and in the [GitHub repo](https://github.com/mbs-midnight/night-estimator).
 
 ## Why It Exists
 
